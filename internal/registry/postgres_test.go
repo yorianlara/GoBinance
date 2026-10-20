@@ -165,6 +165,44 @@ func TestPostgresLen(t *testing.T) {
 	}
 }
 
+func TestPostgresListActiveByBotAndRecent(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	bot1 := sampleProposal("bot1", "BTCUSDT", 0.1)
+	bot2 := sampleProposal("bot2", "ETHUSDT", 1)
+	activeID, err := r.Reserve(bot1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	recentID, err := r.Reserve(bot2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedID, err := r.Reserve(sampleProposal("bot1", "SOLUSDT", 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.MarkCancelled(closedID); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := r.ListActiveByBot("bot1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 || active[0].ClientOrderID != activeID {
+		t.Fatalf("órdenes activas inesperadas: %+v", active)
+	}
+
+	recent, err := r.Recent(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recent) != 1 || recent[0].ClientOrderID != closedID {
+		t.Fatalf("orden reciente inesperada: %+v (segunda reserva %s)", recent, recentID)
+	}
+}
+
 func TestPostgresConcurrentReserveSameProposal(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	p := sampleProposal("bot1", "BTCUSDT", 0.1)

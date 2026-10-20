@@ -1,26 +1,50 @@
 {{define "content"}}
-<h1>mi-bot</h1>
-<p style="margin:0 0 1rem;"><a href="/config" style="color:var(--accent);">⚙️ Configuración</a></p>
-<p class="subtitle">Multi-Bot Trading · Binance Spot Testnet</p>
+<section class="page-heading">
+  <div>
+    <p class="eyebrow">Binance Spot · Testnet</p>
+    <h1>Panel de trading</h1>
+    <p class="subtitle">Supervisa riesgo, órdenes y bots desde un solo lugar.</p>
+  </div>
+</section>
 
-<h2>Métricas</h2>
-<div id="metrics-container"
-     hx-get="/partials/metrics"
-     hx-trigger="every 5s"
-     hx-swap="innerHTML">
-  {{template "metrics" .Metrics}}
-</div>
+<section class="section" aria-labelledby="metrics-title">
+  <div class="section-heading">
+    <h2 id="metrics-title">Resumen de cuenta</h2>
+    <span class="section-kicker">Actualización automática</span>
+  </div>
+  <div id="metrics-container"
+       hx-get="/partials/metrics"
+       hx-trigger="every 5s"
+       hx-swap="innerHTML">
+    {{template "metrics" .Metrics}}
+  </div>
+</section>
 
-<h2>Crear bot</h2>
-{{template "bot-form" .}}
+<section class="section" aria-labelledby="create-bot-title">
+  <div class="section-heading">
+    <div>
+      <h2 id="create-bot-title">Crear bot</h2>
+      <p class="section-kicker">Define su estrategia y límites de asignación.</p>
+    </div>
+  </div>
+  {{template "bot-form" .}}
+  <div id="bot-form-feedback" aria-live="polite"></div>
+</section>
 
-<h2>Bots registrados ({{len .Bots}})</h2>
-<div id="bots-container"
-     hx-get="/partials/bots"
-     hx-trigger="every 5s"
-     hx-swap="innerHTML">
-  {{template "bots-lista" .Bots}}
-</div>
+<section class="section" aria-labelledby="bots-title">
+  <div class="section-heading">
+    <div>
+      <h2 id="bots-title">Bots registrados</h2>
+      <p class="section-kicker">{{len .Bots}} configurados · cambios sincronizados automáticamente</p>
+    </div>
+  </div>
+  <div id="bots-container"
+       hx-get="/partials/bots"
+       hx-trigger="every 5s, botsChanged from:body"
+       hx-swap="innerHTML">
+    {{template "bots-results" .BotList}}
+  </div>
+</section>
 
-<p style="margin-top:2rem;color:#8a94a6;font-size:.85rem;">Dashboard G4.</p>
+<footer class="page-footer">Entorno de pruebas: las órdenes se envían a Binance Spot Testnet.</footer>
 {{end}}

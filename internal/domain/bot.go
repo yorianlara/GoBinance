@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -48,7 +49,8 @@ func (b *Bot) Validate() error {
 		return fmt.Errorf("el símbolo de mercado es obligatorio")
 	}
 
-	if b.AllocationPercent <= 0 || b.AllocationPercent > 100 {
+	if math.IsNaN(b.AllocationPercent) || math.IsInf(b.AllocationPercent, 0) ||
+		b.AllocationPercent <= 0 || b.AllocationPercent > 100 {
 		return fmt.Errorf("la asignación debe ser mayor que 0 y menor o igual que 100")
 	}
 

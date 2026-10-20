@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -51,7 +52,10 @@ func TestOrderProposalRequiredFields(t *testing.T) {
 		{"tipo inválido", func(p *OrderProposal) { p.Type = "stop" }},
 		{"cantidad cero", func(p *OrderProposal) { p.Quantity = 0 }},
 		{"cantidad negativa", func(p *OrderProposal) { p.Quantity = -1 }},
+		{"cantidad NaN", func(p *OrderProposal) { p.Quantity = math.NaN() }},
+		{"cantidad infinita", func(p *OrderProposal) { p.Quantity = math.Inf(1) }},
 		{"limit sin precio", func(p *OrderProposal) { p.Type = OrderTypeLimit }},
+		{"precio límite infinito", func(p *OrderProposal) { p.Type = OrderTypeLimit; p.LimitPrice = math.Inf(1) }},
 		{"market con precio", func(p *OrderProposal) { p.LimitPrice = 100 }},
 		{"sin fecha", func(p *OrderProposal) { p.ProposedAt = time.Time{} }},
 	}

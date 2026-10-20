@@ -13,9 +13,14 @@ type Deps struct {
 	RiskState       *risk.StatefulManager
 	Registry        registry.OrderRegistry
 	ConfigStore     *config.Store
+	Allocations     AllocationProvider
 	Market          MarketProvider
 	Klines          KlineProvider
 	Executor        OrderExecutor
+}
+
+type AllocationProvider interface {
+	AllocationPercentages(strategyType string) (total, strategy float64)
 }
 
 func (d Deps) validate() error {

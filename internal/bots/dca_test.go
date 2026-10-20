@@ -82,11 +82,54 @@ func TestDCARespectsMaxBuys(t *testing.T) {
 		if len(props) != 1 {
 			t.Fatalf("compra %d: se esperaba 1, hay %d", i, len(props))
 		}
+		d.OnOrderClosed(true)
 		time.Sleep(10 * time.Millisecond)
 	}
 	props, _ := d.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 100})
 	if len(props) != 0 {
 		t.Fatalf("se esperaba 0 tras max_buys, hay %d", len(props))
+	}
+}
+
+func TestDCARejectedProposalCanRetry(t *testing.T) {
+	d := newDCA(t, 10, 60, 1)
+	data := MarketData{Symbol: "BTCUSDT", Price: 100}
+	first, err := d.Evaluate(context.Background(), data)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("primera propuesta: %v, %v", first, err)
+	}
+	d.OnOrderRejected()
+
+	retry, err := d.Evaluate(context.Background(), data)
+	if err != nil || len(retry) != 1 {
+		t.Fatalf("tras rechazo debía poder reintentar; propuesta=%v, error=%v", retry, err)
+	}
+}
+
+func TestDCACancelledOrderDoesNotConsumeMaxBuys(t *testing.T) {
+	d := newDCA(t, 10, 60, 1)
+	data := MarketData{Symbol: "BTCUSDT", Price: 100}
+	_, _ = d.Evaluate(context.Background(), data)
+	d.OnOrderClosed(false)
+
+	props, err := d.Evaluate(context.Background(), data)
+	if err != nil || len(props) != 1 {
+		t.Fatalf("tras cancelación debe poder proponer; propuesta=%v, error=%v", props, err)
+	}
+}
+
+func TestDCAFilledOrderConsumesMaxBuys(t *testing.T) {
+	d := newDCA(t, 10, 0.0001, 1)
+	_, _ = d.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 100})
+	d.OnOrderClosed(true)
+	time.Sleep(10 * time.Millisecond)
+
+	props, err := d.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(props) != 0 {
+		t.Fatalf("tras alcanzar max_buys no debe proponer, hay %d", len(props))
 	}
 }
 

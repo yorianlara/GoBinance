@@ -1,0 +1,5 @@
+{{define "bot-form-feedback"}}
+{{if .Message}}
+<p class="{{if .IsError}}flash-error{{else}}flash-success{{end}}" role="{{if .IsError}}alert{{else}}status{{end}}">{{.Message}}</p>
+{{end}}
+{{end}}

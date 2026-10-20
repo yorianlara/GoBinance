@@ -137,6 +137,39 @@ func (r *MemoryRegistry) List() ([]TrackedOrder, error) {
 	return out, nil
 }
 
+func (r *MemoryRegistry) ListActiveByBot(botID string) ([]TrackedOrder, error) {
+	if botID == "" {
+		return nil, fmt.Errorf("botID es obligatorio")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]TrackedOrder, 0)
+	for _, o := range r.orders {
+		if o.Proposal.BotID == botID && (o.State == StateReserved || o.State == StateSubmitted) {
+			out = append(out, *o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (r *MemoryRegistry) Recent(limit int) ([]TrackedOrder, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit debe ser mayor que cero")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]TrackedOrder, 0, len(r.orders))
+	for _, o := range r.orders {
+		out = append(out, *o)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (r *MemoryRegistry) PendingExposureUSDT(priceBySymbol map[string]float64) (float64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

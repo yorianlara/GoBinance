@@ -7,43 +7,43 @@
       hx-swap="innerHTML">
   <div class="config-grid">
     <label>
-      <span>max_total_allocation_percent</span>
+      <span>Asignación total máxima (%)</span>
       <input type="number" step="0.1" name="max_total_allocation_percent" value="{{.Risk.MaxTotalAllocationPercent}}" required>
     </label>
     <label>
-      <span>max_drawdown_percent</span>
+      <span>Drawdown máximo (%)</span>
       <input type="number" step="0.1" name="max_drawdown_percent" value="{{.Risk.MaxDrawdownPercent}}" required>
     </label>
     <label>
-      <span>max_order_percent</span>
+      <span>Tamaño máximo por orden (%)</span>
       <input type="number" step="0.1" name="max_order_percent" value="{{.Risk.MaxOrderPercent}}" required>
     </label>
     <label>
-      <span>max_asset_exposure_percent</span>
+      <span>Exposición máxima por activo (%)</span>
       <input type="number" step="0.1" name="max_asset_exposure_percent" value="{{.Risk.MaxAssetExposurePercent}}" required>
     </label>
     <label>
-      <span>max_total_exposure_percent</span>
+      <span>Exposición total máxima (%)</span>
       <input type="number" step="0.1" name="max_total_exposure_percent" value="{{.Risk.MaxTotalExposurePercent}}" required>
     </label>
     <label>
-      <span>max_open_positions</span>
+      <span>Posiciones abiertas máximas</span>
       <input type="number" step="1" min="1" name="max_open_positions" value="{{.Risk.MaxOpenPositions}}" required>
     </label>
     <label>
-      <span>max_daily_loss_eur</span>
+      <span>Pérdida diaria máxima (EUR)</span>
       <input type="number" step="0.1" name="max_daily_loss_eur" value="{{.Risk.MaxDailyLossEUR}}" required>
     </label>
     <label>
-      <span>max_total_loss_eur</span>
+      <span>Pérdida acumulada máxima (EUR)</span>
       <input type="number" step="0.1" name="max_total_loss_eur" value="{{.Risk.MaxTotalLossEUR}}" required>
     </label>
     <label>
-      <span>max_allocation_per_strategy_percent</span>
+      <span>Asignación máxima por estrategia (%)</span>
       <input type="number" step="0.1" name="max_allocation_per_strategy_percent" value="{{.Risk.MaxAllocationPerStrategyPercent}}" required>
     </label>
     <label>
-      <span>max_order_age_minutes</span>
+      <span>Antigüedad límite de orden (minutos)</span>
       <input type="number" step="1" min="1" name="max_order_age_minutes" value="{{.Risk.MaxOrderAgeMinutes}}" required>
     </label>
   </div>

@@ -23,12 +23,14 @@ func New(deps Deps) (*BotManager, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &BotManager{
+	m := &BotManager{
 		runtimes: make(map[string]*BotRuntime),
 		deps:     deps,
 		ctx:      ctx,
 		cancel:   cancel,
-	}, nil
+	}
+	m.deps.Allocations = m
+	return m, nil
 }
 
 func (m *BotManager) Start() error {
@@ -157,6 +159,20 @@ func (m *BotManager) List() []domain.Bot {
 	}
 	sort.Slice(bots, func(i, j int) bool { return bots[i].ID < bots[j].ID })
 	return bots
+}
+
+func (m *BotManager) AllocationPercentages(strategyType string) (total, strategy float64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, rt := range m.runtimes {
+		bot := rt.Bot()
+		total += bot.AllocationPercent
+		if bot.Strategy.Type == strategyType {
+			strategy += bot.AllocationPercent
+		}
+	}
+	return total, strategy
 }
 
 func (m *BotManager) Status(id string) (domain.BotStatus, bool) {

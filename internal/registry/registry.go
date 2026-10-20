@@ -40,6 +40,8 @@ type OrderRegistry interface {
 	MarkFailed(clientOrderID string) error
 	Get(clientOrderID string) (TrackedOrder, bool)
 	List() ([]TrackedOrder, error)
+	ListActiveByBot(botID string) ([]TrackedOrder, error)
+	Recent(limit int) ([]TrackedOrder, error)
 	PendingExposureUSDT(priceBySymbol map[string]float64) (float64, error)
 	Len() (int, error)
 }

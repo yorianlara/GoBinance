@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -70,6 +71,26 @@ func TestEvaluateCapitalCero(t *testing.T) {
 	ctx.CapitalTotalUSDT = 0
 	if rm.Evaluate(validProposal(), &staticConfigProvider{defaultCfg()}, ctx).Approved {
 		t.Fatal("se esperaba rechazo")
+	}
+}
+
+func TestEvaluateRejectsNonFiniteRiskContext(t *testing.T) {
+	tests := []struct {
+		name string
+		set  func(*Context)
+	}{
+		{"asignación global NaN", func(c *Context) { c.BotsAllocatedPct = math.NaN() }},
+		{"exposición infinita", func(c *Context) { c.CurrentExposureUSDT = math.Inf(1) }},
+		{"precio NaN", func(c *Context) { c.CurrentPrice = math.NaN() }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := happyCtx()
+			tt.set(&ctx)
+			if d := New().Evaluate(validProposal(), &staticConfigProvider{defaultCfg()}, ctx); d.Approved {
+				t.Fatal("el contexto no finito debía rechazarse")
+			}
+		})
 	}
 }
 

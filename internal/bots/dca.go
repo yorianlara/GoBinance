@@ -24,6 +24,7 @@ type DCAStrategy struct {
 	mu      sync.Mutex
 	lastBuy time.Time
 	buys    int
+	pending bool
 }
 
 func NewDCAStrategy(cfg domain.StrategyConfig) (*DCAStrategy, error) {
@@ -72,6 +73,9 @@ func (d *DCAStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.O
 	if d.maxBuys > 0 && d.buys >= d.maxBuys {
 		return nil, nil
 	}
+	if d.pending {
+		return nil, nil
+	}
 	if !d.lastBuy.IsZero() && time.Since(d.lastBuy) < d.interval {
 		return nil, nil
 	}
@@ -81,9 +85,7 @@ func (d *DCAStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.O
 		return nil, nil
 	}
 
-	// Solución A: actualizamos estado incondicionalmente al proponer.
-	d.lastBuy = time.Now()
-	d.buys++
+	d.pending = true
 
 	return []domain.OrderProposal{
 		{
@@ -96,4 +98,20 @@ func (d *DCAStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.O
 			ProposedAt: time.Now(),
 		},
 	}, nil
+}
+
+func (d *DCAStrategy) OnOrderRejected() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pending = false
+}
+
+func (d *DCAStrategy) OnOrderClosed(filled bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.pending = false
+	if filled {
+		d.lastBuy = time.Now()
+		d.buys++
+	}
 }

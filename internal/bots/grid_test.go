@@ -69,17 +69,17 @@ func TestGridPriceBelowCenterProposesBuy(t *testing.T) {
 	if p.LimitPrice != 97 {
 		t.Fatalf("limit_price: %v (esperado 97)", p.LimitPrice)
 	}
+	if p.ProposedAt.IsZero() {
+		t.Fatal("la propuesta debe incluir ProposedAt")
+	}
 }
 
-func TestGridPriceAboveCenterProposesSell(t *testing.T) {
+func TestGridPriceAboveCenterDoesNotProposeSell(t *testing.T) {
 	g := newGrid(t, 5, 1, 10)
 	g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 100})
 	props, _ := g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 102})
-	if len(props) != 1 {
-		t.Fatalf("se esperaba 1, hay %d", len(props))
-	}
-	if props[0].Side != domain.OrderSideSell {
-		t.Fatalf("side: %v", props[0].Side)
+	if len(props) != 0 {
+		t.Fatalf("no debe proponer ventas sin contabilidad de inventario, hay %d", len(props))
 	}
 }
 
@@ -94,7 +94,7 @@ func TestGridOnlyOneActiveOrder(t *testing.T) {
 	if len(props2) != 0 {
 		t.Fatalf("segunda: %d (no debe haber)", len(props2))
 	}
-	g.OnOrderClosed()
+	g.OnOrderClosed(true)
 	props3, _ := g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 96})
 	if len(props3) != 1 {
 		t.Fatalf("tras OnOrderClosed: %d", len(props3))

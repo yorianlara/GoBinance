@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 
 	"go.yaml.in/yaml/v3"
@@ -93,6 +94,23 @@ func (c *Config) Validate() error {
 	}
 	if c.Database.URLEnv == "" {
 		c.Database.URLEnv = "DATABASE_URL"
+	}
+	for _, field := range []struct {
+		name  string
+		value float64
+	}{
+		{"max_total_allocation_percent", c.Risk.MaxTotalAllocationPercent},
+		{"max_drawdown_percent", c.Risk.MaxDrawdownPercent},
+		{"max_order_percent", c.Risk.MaxOrderPercent},
+		{"max_asset_exposure_percent", c.Risk.MaxAssetExposurePercent},
+		{"max_total_exposure_percent", c.Risk.MaxTotalExposurePercent},
+		{"max_daily_loss_eur", c.Risk.MaxDailyLossEUR},
+		{"max_total_loss_eur", c.Risk.MaxTotalLossEUR},
+		{"max_allocation_per_strategy_percent", c.Risk.MaxAllocationPerStrategyPercent},
+	} {
+		if math.IsNaN(field.value) || math.IsInf(field.value, 0) {
+			return fmt.Errorf("risk.%s debe ser un número finito", field.name)
+		}
 	}
 	if c.Risk.MaxTotalAllocationPercent <= 0 || c.Risk.MaxTotalAllocationPercent > 100 {
 		return fmt.Errorf("risk.max_total_allocation_percent debe estar entre 0 y 100")

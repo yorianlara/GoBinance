@@ -146,13 +146,45 @@ func (r *PostgresRegistry) Get(clientOrderID string) (TrackedOrder, bool) {
 }
 
 func (r *PostgresRegistry) List() ([]TrackedOrder, error) {
-	rows, err := r.db.Query(`
+	return r.queryOrders(`
 		SELECT client_order_id, bot_id, symbol, side, type,
 		       quantity, limit_price, reason, proposed_at,
 		       state, exchange_id, filled_qty, filled_value,
 		       created_at, updated_at
 		FROM orders ORDER BY created_at ASC
 	`)
+}
+
+func (r *PostgresRegistry) ListActiveByBot(botID string) ([]TrackedOrder, error) {
+	if botID == "" {
+		return nil, fmt.Errorf("botID es obligatorio")
+	}
+	return r.queryOrders(`
+		SELECT client_order_id, bot_id, symbol, side, type,
+		       quantity, limit_price, reason, proposed_at,
+		       state, exchange_id, filled_qty, filled_value,
+		       created_at, updated_at
+		FROM orders
+		WHERE bot_id = $1 AND state IN ($2, $3)
+		ORDER BY created_at ASC
+	`, botID, string(StateReserved), string(StateSubmitted))
+}
+
+func (r *PostgresRegistry) Recent(limit int) ([]TrackedOrder, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit debe ser mayor que cero")
+	}
+	return r.queryOrders(`
+		SELECT client_order_id, bot_id, symbol, side, type,
+		       quantity, limit_price, reason, proposed_at,
+		       state, exchange_id, filled_qty, filled_value,
+		       created_at, updated_at
+		FROM orders ORDER BY created_at DESC LIMIT $1
+	`, limit)
+}
+
+func (r *PostgresRegistry) queryOrders(query string, args ...any) ([]TrackedOrder, error) {
+	rows, err := r.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listar órdenes: %w", err)
 	}

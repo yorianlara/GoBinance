@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -73,6 +74,8 @@ func TestBotValidateAllocation(t *testing.T) {
 		{"asignación cero", 0},
 		{"asignación negativa", -1},
 		{"asignación superior al máximo", 100.01},
+		{"asignación NaN", math.NaN()},
+		{"asignación infinita", math.Inf(1)},
 	}
 
 	for _, tt := range tests {

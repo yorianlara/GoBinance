@@ -27,23 +27,25 @@
   </div>
 </div>
 
-<h3 style="margin-top:1.5rem;font-size:.95rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">Órdenes recientes</h3>
+<h3 class="orders-title">Órdenes recientes</h3>
 {{if .RecentOrders}}
-<table>
-  <thead><tr><th>Client Order ID</th><th>Símbolo</th><th>Estado</th><th>Cantidad</th><th>Valor</th><th>Hace</th></tr></thead>
-  <tbody>
-    {{range .RecentOrders}}
-    <tr>
-      <td><code>{{slice .ClientOrderID 0 8}}…</code></td>
-      <td>{{.Symbol}}</td>
-      <td class="status-{{.State}}">{{.State}}</td>
-      <td>{{printf "%.6f" .Quantity}}</td>
-      <td>{{printf "%.2f" .FilledValue}} USDT</td>
-      <td>{{.Age}}</td>
-    </tr>
-    {{end}}
-  </tbody>
-</table>
+<div class="table-scroll">
+  <table>
+    <thead><tr><th>Orden</th><th>Símbolo</th><th>Estado</th><th>Cantidad</th><th>Valor ejecutado</th><th>Hace</th></tr></thead>
+    <tbody>
+      {{range .RecentOrders}}
+      <tr>
+        <td><code>{{slice .ClientOrderID 0 8}}…</code></td>
+        <td>{{.Symbol}}</td>
+        <td><span class="status status-{{.State}}">{{.State}}</span></td>
+        <td>{{printf "%.6f" .Quantity}}</td>
+        <td>{{printf "%.2f" .FilledValue}} USDT</td>
+        <td>{{.Age}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
 {{else}}
 <p class="empty">Sin órdenes recientes.</p>
 {{end}}

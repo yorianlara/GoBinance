@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"mi-bot/internal/domain"
 )
@@ -12,8 +13,8 @@ import (
 //   - Fija un centro en el primer tick.
 //   - Si el precio baja N niveles respecto al centro, propone una COMPRA
 //     límite en el nivel inferior más cercano.
-//   - Si el precio sube N niveles respecto al centro, propone una VENTA
-//     límite en el nivel superior más cercano (si tiene inventario).
+//   - Las señales por encima del centro no generan órdenes; las ventas no
+//     están habilitadas hasta contar con contabilidad de inventario.
 //   - Solo mantiene UNA orden activa a la vez (hasta Fase F, donde habrá
 //     órdenes con estado persistente y se podrá hacer Grid completo).
 //   - Si el precio se aleja demasiado del centro, recentra.
@@ -29,11 +30,9 @@ type GridStrategy struct {
 	sizeUSDT   float64
 	maxOrders  int
 
-	mu        sync.Mutex
-	center    float64
-	hasOrder  bool
-	lastSide  domain.OrderSide
-	lastLevel int
+	mu       sync.Mutex
+	center   float64
+	hasOrder bool
 }
 
 func NewGridStrategy(cfg domain.StrategyConfig) (*GridStrategy, error) {
@@ -111,16 +110,11 @@ func (g *GridStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.
 	stepPct := (data.Price - g.center) / g.center * 100
 	steps := int(stepPct / g.spacingPct)
 
-	var side domain.OrderSide
 	var level int
 	if steps < 0 {
-		side = domain.OrderSideBuy
 		level = steps // negativo
-	} else if steps > 0 {
-		side = domain.OrderSideSell
-		level = steps
 	} else {
-		// Precio en el centro: no hay señal.
+		// No se habilitan ventas sin comprobar inventario disponible.
 		return nil, nil
 	}
 
@@ -130,12 +124,7 @@ func (g *GridStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.
 	}
 
 	// Calcular precio límite del nivel de ejecución.
-	var limitPrice float64
-	if side == domain.OrderSideBuy {
-		limitPrice = g.center * (1 + float64(level)*g.spacingPct/100)
-	} else {
-		limitPrice = g.center * (1 + float64(level)*g.spacingPct/100)
-	}
+	limitPrice := g.center * (1 + float64(level)*g.spacingPct/100)
 	if limitPrice <= 0 {
 		return nil, nil
 	}
@@ -146,25 +135,29 @@ func (g *GridStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.
 	}
 
 	g.hasOrder = true
-	g.lastSide = side
-	g.lastLevel = level
 
 	return []domain.OrderProposal{
 		{
 			Symbol:     data.Symbol,
-			Side:       side,
+			Side:       domain.OrderSideBuy,
 			Type:       domain.OrderTypeLimit,
 			Quantity:   qty,
 			LimitPrice: limitPrice,
 			Reason:     fmt.Sprintf("grid level %d", level),
+			ProposedAt: time.Now(),
 		},
 	}, nil
 }
 
-// OnOrderClosed debe llamarse cuando una orden de Grid se ejecuta o se
-// cancela, para permitir la siguiente. En Fase F se integrará con el
-// estado real de órdenes; por ahora es un hook.
-func (g *GridStrategy) OnOrderClosed() {
+// OnOrderRejected libera una propuesta que no llegó a convertirse en orden.
+func (g *GridStrategy) OnOrderRejected() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.hasOrder = false
+}
+
+// OnOrderClosed permite proponer la siguiente compra tras cerrar una orden.
+func (g *GridStrategy) OnOrderClosed(_ bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.hasOrder = false

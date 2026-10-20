@@ -17,7 +17,7 @@ func (r *BotRuntime) reconcile(ctx context.Context, bot domain.Bot) {
 		return
 	}
 
-	orders, err := r.deps.Registry.List()
+	orders, err := r.deps.Registry.ListActiveByBot(bot.ID)
 	if err != nil {
 		slog.Warn("reconcile: list", "bot", bot.ID, "err", err)
 		return
@@ -26,9 +26,6 @@ func (r *BotRuntime) reconcile(ctx context.Context, bot domain.Bot) {
 	maxAge := time.Duration(r.deps.ConfigStore.Risk().MaxOrderAgeMinutes) * time.Minute
 
 	for _, o := range orders {
-		if o.Proposal.BotID != bot.ID {
-			continue
-		}
 		if o.State != registry.StateSubmitted {
 			continue
 		}
@@ -43,7 +40,7 @@ func (r *BotRuntime) reconcile(ctx context.Context, bot domain.Bot) {
 				continue
 			}
 			r.deps.RiskState.OnOrderCancelled(o.Proposal.Symbol, o.Proposal.Quantity)
-			r.notifyOrderClosed()
+			r.notifyOrderClosed(false)
 			continue
 		}
 
@@ -80,7 +77,7 @@ func (r *BotRuntime) reconcileOne(ctx context.Context, bot domain.Bot, o registr
 			return
 		}
 		r.deps.RiskState.OnOrderFilled(o.Proposal.Symbol, value)
-		r.notifyOrderClosed()
+		r.notifyOrderClosed(true)
 		slog.Info("reconcile: order filled",
 			"bot", bot.ID, "client_order_id", o.ClientOrderID,
 			"qty", qty, "value_usdt", value)
@@ -91,7 +88,7 @@ func (r *BotRuntime) reconcileOne(ctx context.Context, bot domain.Bot, o registr
 			return
 		}
 		r.deps.RiskState.OnOrderCancelled(o.Proposal.Symbol, o.Proposal.Quantity)
-		r.notifyOrderClosed()
+		r.notifyOrderClosed(false)
 		slog.Info("reconcile: order cancelled",
 			"bot", bot.ID, "client_order_id", o.ClientOrderID, "status", ord.Status)
 
@@ -100,9 +97,15 @@ func (r *BotRuntime) reconcileOne(ctx context.Context, bot domain.Bot, o registr
 	}
 }
 
-// notifyOrderClosed avisa a la estrategia si implementa OrderLifecycleListener.
-func (r *BotRuntime) notifyOrderClosed() {
+func (r *BotRuntime) notifyOrderRejected() {
 	if l, ok := r.strategy.(bots.OrderLifecycleListener); ok {
-		l.OnOrderClosed()
+		l.OnOrderRejected()
+	}
+}
+
+// notifyOrderClosed avisa a la estrategia si implementa OrderLifecycleListener.
+func (r *BotRuntime) notifyOrderClosed(filled bool) {
+	if l, ok := r.strategy.(bots.OrderLifecycleListener); ok {
+		l.OnOrderClosed(filled)
 	}
 }

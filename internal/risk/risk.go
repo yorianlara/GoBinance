@@ -2,6 +2,7 @@ package risk
 
 import (
 	"fmt"
+	"math"
 
 	"mi-bot/internal/config"
 	"mi-bot/internal/domain"
@@ -42,6 +43,25 @@ func (rm *RiskManager) Evaluate(p domain.OrderProposal, provider RiskConfigProvi
 
 	if err := p.Validate(); err != nil {
 		return reject("propuesta inválida: " + err.Error())
+	}
+	for _, field := range []struct {
+		name  string
+		value float64
+	}{
+		{"capital total", ctx.CapitalTotalUSDT},
+		{"precio actual", ctx.CurrentPrice},
+		{"exposición total", ctx.CurrentExposureUSDT},
+		{"exposición del símbolo", ctx.CurrentExposureSym},
+		{"drawdown", ctx.CurrentDrawdownPct},
+		{"PnL diario", ctx.CurrentDailyPnL},
+		{"PnL total", ctx.CurrentTotalPnL},
+		{"asignación global", ctx.BotsAllocatedPct},
+		{"asignación de estrategia", ctx.StrategyAllocatedPct},
+		{"exposición pendiente", ctx.PendingExposureUSDT},
+	} {
+		if math.IsNaN(field.value) || math.IsInf(field.value, 0) {
+			return reject(field.name + " no es un número finito")
+		}
 	}
 	if ctx.CapitalTotalUSDT <= 0 {
 		return reject("capital total no disponible o no positivo")

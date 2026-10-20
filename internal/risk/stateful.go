@@ -52,18 +52,30 @@ func (sm *StatefulManager) RiskManager() *RiskManager {
 // RiskManager.Evaluate. Además, actualiza el PeakCapital y hace reset
 // diario si corresponde.
 func (sm *StatefulManager) Evaluate(p domain.OrderProposal, provider RiskConfigProvider, capital, price, pending float64) Decision {
+	return sm.EvaluateWithAllocations(p, provider, capital, price, pending, 0, 0)
+}
+
+func (sm *StatefulManager) EvaluateWithAllocations(
+	p domain.OrderProposal,
+	provider RiskConfigProvider,
+	capital, price, pending, botsAllocatedPct, strategyAllocatedPct float64,
+) Decision {
 	sm.mu.Lock()
 	sm.maybeResetDailyLocked(time.Now())
 	if capital > sm.state.PeakCapitalUSDT {
 		sm.state.PeakCapitalUSDT = capital
 	}
-	ctx := sm.buildContextLocked(capital, price, p.Symbol, pending)
+	ctx := sm.buildContextLocked(capital, price, p.Symbol, pending, botsAllocatedPct, strategyAllocatedPct)
 	sm.mu.Unlock()
 
 	return sm.rm.Evaluate(p, provider, ctx)
 }
 
-func (sm *StatefulManager) buildContextLocked(capital, price float64, symbol string, pending float64) Context {
+func (sm *StatefulManager) buildContextLocked(
+	capital, price float64,
+	symbol string,
+	pending, botsAllocatedPct, strategyAllocatedPct float64,
+) Context {
 	drawdown := 0.0
 	if sm.state.PeakCapitalUSDT > 0 {
 		drawdown = (sm.state.PeakCapitalUSDT - capital) / sm.state.PeakCapitalUSDT * 100
@@ -77,8 +89,8 @@ func (sm *StatefulManager) buildContextLocked(capital, price float64, symbol str
 		CurrentDailyPnL:      sm.state.DailyPnL,
 		CurrentTotalPnL:      sm.state.TotalPnL,
 		OpenPositions:        sm.state.OpenPositions,
-		BotsAllocatedPct:     0, // se rellena cuando Fase E/F aporte datos
-		StrategyAllocatedPct: 0,
+		BotsAllocatedPct:     botsAllocatedPct,
+		StrategyAllocatedPct: strategyAllocatedPct,
 		PendingExposureUSDT:  pending,
 	}
 }

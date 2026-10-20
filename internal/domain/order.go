@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -58,10 +59,13 @@ func (p *OrderProposal) Validate() error {
 		return fmt.Errorf("tipo de orden no válido: %q", p.Type)
 	}
 
-	if p.Quantity <= 0 {
+	if math.IsNaN(p.Quantity) || math.IsInf(p.Quantity, 0) || p.Quantity <= 0 {
 		return fmt.Errorf("la cantidad debe ser mayor que cero")
 	}
 
+	if math.IsNaN(p.LimitPrice) || math.IsInf(p.LimitPrice, 0) {
+		return fmt.Errorf("el precio límite debe ser finito")
+	}
 	if p.Type == OrderTypeLimit && p.LimitPrice <= 0 {
 		return fmt.Errorf("una orden limit requiere limit_price mayor que cero")
 	}

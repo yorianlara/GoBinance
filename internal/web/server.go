@@ -146,7 +146,19 @@ type recentOrder struct {
 type pageData struct {
 	Title   string
 	Bots    []domain.Bot
+	BotList botsResultData
 	Metrics metricsData
+}
+
+type botsResultData struct {
+	Bots    []domain.Bot
+	Message string
+	IsError bool
+}
+
+type botFeedbackData struct {
+	Message string
+	IsError bool
 }
 
 func (s *Server) buildMetrics() metricsData {
@@ -172,20 +184,20 @@ func (s *Server) buildMetrics() metricsData {
 	}
 
 	if s.deps.Registry != nil {
-		orders, _ := s.deps.Registry.List()
-		if len(orders) > 10 {
-			orders = orders[len(orders)-10:]
-		}
-		for i := len(orders) - 1; i >= 0; i-- {
-			o := orders[i]
-			m.RecentOrders = append(m.RecentOrders, recentOrder{
-				ClientOrderID: o.ClientOrderID,
-				Symbol:        o.Proposal.Symbol,
-				State:         string(o.State),
-				Quantity:      o.Proposal.Quantity,
-				FilledValue:   o.FilledValue,
-				Age:           humanAge(time.Since(o.CreatedAt)),
-			})
+		orders, err := s.deps.Registry.Recent(10)
+		if err != nil {
+			slog.Warn("web: consultar órdenes recientes", "err", err)
+		} else {
+			for _, o := range orders {
+				m.RecentOrders = append(m.RecentOrders, recentOrder{
+					ClientOrderID: o.ClientOrderID,
+					Symbol:        o.Proposal.Symbol,
+					State:         string(o.State),
+					Quantity:      o.Proposal.Quantity,
+					FilledValue:   o.FilledValue,
+					Age:           humanAge(time.Since(o.CreatedAt)),
+				})
+			}
 		}
 	}
 	return m
@@ -203,14 +215,33 @@ func humanAge(d time.Duration) string {
 }
 
 func (s *Server) handleIndex(c *fiber.Ctx) error {
-	data := pageData{Title: "Dashboard", Bots: s.deps.Bots.List(), Metrics: s.buildMetrics()}
+	bots := s.deps.Bots.List()
+	data := pageData{
+		Title:   "Dashboard",
+		Bots:    bots,
+		BotList: botsResultData{Bots: bots},
+		Metrics: s.buildMetrics(),
+	}
 	c.Set("Content-Type", "text/html; charset=utf-8")
 	return s.pages.ExecuteTemplate(c, "layout", data)
 }
 
 func (s *Server) renderBots(c *fiber.Ctx) error {
+	return s.renderBotResults(c, "", false)
+}
+
+func (s *Server) renderBotResults(c *fiber.Ctx, message string, isError bool) error {
 	c.Set("Content-Type", "text/html; charset=utf-8")
-	return s.pages.ExecuteTemplate(c, "bots-lista", s.deps.Bots.List())
+	return s.pages.ExecuteTemplate(c, "bots-results", botsResultData{
+		Bots: s.deps.Bots.List(), Message: message, IsError: isError,
+	})
+}
+
+func (s *Server) renderBotFeedback(c *fiber.Ctx, message string, isError bool) error {
+	c.Set("Content-Type", "text/html; charset=utf-8")
+	return s.pages.ExecuteTemplate(c, "bot-form-feedback", botFeedbackData{
+		Message: message, IsError: isError,
+	})
 }
 
 func (s *Server) handlePartialBots(c *fiber.Ctx) error { return s.renderBots(c) }
@@ -231,11 +262,11 @@ func (s *Server) handleCreateBot(c *fiber.Ctx) error {
 
 	alloc, err := strconv.ParseFloat(allocStr, 64)
 	if err != nil || alloc <= 0 || alloc > 100 {
-		return s.renderBots(c)
+		return s.renderBotFeedback(c, "La asignación debe ser un número entre 0 y 100.", true)
 	}
 	amount, err := strconv.ParseFloat(amountStr, 64)
 	if err != nil || amount <= 0 {
-		return s.renderBots(c)
+		return s.renderBotFeedback(c, "El importe por compra debe ser mayor que cero.", true)
 	}
 
 	params := map[string]float64{}
@@ -268,33 +299,39 @@ func (s *Server) handleCreateBot(c *fiber.Ctx) error {
 	}
 	if err := s.deps.Bots.Create(bot); err != nil {
 		slog.Warn("web: crear bot", "id", id, "err", err)
+		return s.renderBotFeedback(c, err.Error(), true)
 	}
-	return s.renderBots(c)
+	c.Set("HX-Trigger", "botsChanged")
+	return s.renderBotFeedback(c, "Bot creado correctamente.", false)
 }
 
 func (s *Server) handleEnable(c *fiber.Ctx) error {
 	if err := s.deps.Bots.Enable(c.Params("id")); err != nil {
 		slog.Warn("web: enable", "err", err)
+		return s.renderBotResults(c, err.Error(), true)
 	}
-	return s.renderBots(c)
+	return s.renderBotResults(c, "Bot encendido.", false)
 }
 func (s *Server) handlePause(c *fiber.Ctx) error {
 	if err := s.deps.Bots.Pause(c.Params("id")); err != nil {
 		slog.Warn("web: pause", "err", err)
+		return s.renderBotResults(c, err.Error(), true)
 	}
-	return s.renderBots(c)
+	return s.renderBotResults(c, "Bot pausado.", false)
 }
 func (s *Server) handleStop(c *fiber.Ctx) error {
 	if err := s.deps.Bots.StopBot(c.Params("id")); err != nil {
 		slog.Warn("web: stop", "err", err)
+		return s.renderBotResults(c, err.Error(), true)
 	}
-	return s.renderBots(c)
+	return s.renderBotResults(c, "Bot detenido.", false)
 }
 func (s *Server) handleDelete(c *fiber.Ctx) error {
 	if err := s.deps.Bots.Delete(c.Params("id")); err != nil {
 		slog.Warn("web: delete", "err", err)
+		return s.renderBotResults(c, err.Error(), true)
 	}
-	return s.renderBots(c)
+	return s.renderBotResults(c, "Bot eliminado.", false)
 }
 
 // ---------- configuración ----------

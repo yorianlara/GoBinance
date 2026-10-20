@@ -6,34 +6,52 @@
   <title>Configuración — mi-bot</title>
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
   <style>
-    :root { --bg: #0f1419; --card: #1a2028; --border: #2a3441; --text: #e6e6e6; --muted: #8a94a6; --accent: #4ade80; --danger: #f87171; --warn: #fbbf24; }
+    :root { color-scheme: dark; --bg: #0b1118; --card: #151f2b; --border: #293849; --text: #e6edf5; --muted: #91a0b2; --accent: #67e8a5; --danger: #ff7c87; }
     * { box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: var(--bg); color: var(--text); max-width: 1100px; margin-left: auto; margin-right: auto; }
-    h1 { margin: 0 0 .5rem; }
-    h2 { margin: 1.5rem 0 .5rem; font-size: 1.1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
-    .subtitle { color: var(--muted); margin: 0 0 2rem; }
-    code { background: #2a3441; padding: .15rem .4rem; border-radius: 3px; font-size: .85em; }
-    .config-form { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 1rem 1.25rem; }
-    .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem 1rem; margin-bottom: 1rem; }
-    .config-grid label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; color: var(--muted); }
-    .config-grid input { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: .4rem .6rem; border-radius: 4px; font-family: inherit; }
-    button { background: #2a3441; color: var(--text); border: 1px solid var(--border); padding: .4rem .8rem; border-radius: 4px; cursor: pointer; }
-    button:hover { background: #3a4553; }
-    button.primary { background: var(--accent); color: #0f1419; font-weight: 600; }
-    .flash-success { color: var(--accent); font-weight: 600; }
-    .flash-error { color: var(--danger); font-weight: 600; }
+    body { min-height: 100vh; margin: 0; padding: 0 1.5rem 3rem; background: radial-gradient(ellipse at 50% -30%, #1d3442 0, var(--bg) 58%); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .app-shell { max-width: 1000px; margin: 0 auto; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; min-height: 76px; margin-bottom: 2.2rem; border-bottom: 1px solid #263442; }
+    .brand { color: var(--text); font-size: 1.12rem; font-weight: 760; text-decoration: none; }
+    .nav-link { color: var(--muted); font-size: .88rem; text-decoration: none; }
+    .nav-link:hover { color: var(--accent); }
+    .page-heading { margin-bottom: 1.5rem; }
+    .eyebrow { margin: 0 0 .55rem; color: var(--accent); font-size: .72rem; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(1.7rem, 3vw, 2.35rem); letter-spacing: -.045em; }
+    h2 { margin: 0 0 1rem; font-size: 1.05rem; }
+    .subtitle { margin: .55rem 0 0; color: var(--muted); font-size: .94rem; }
+    .section { margin-top: 1.5rem; padding: 1.25rem; border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(145deg, rgba(23, 34, 46, .96), rgba(17, 26, 36, .96)); }
+    .config-form { padding: 0; border: 0; background: transparent; }
+    .config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; margin-bottom: 1.2rem; }
+    .config-grid label { display: flex; flex-direction: column; gap: .42rem; color: #bdc8d5; font-size: .8rem; font-weight: 650; }
+    .config-grid input { width: 100%; min-height: 42px; border: 1px solid #314253; border-radius: 9px; padding: .62rem .72rem; color: var(--text); background: #0d151e; font: inherit; }
+    button { border: 1px solid #2bc981; border-radius: 9px; padding: .62rem .9rem; color: #07150e; background: #2bc981; cursor: pointer; font: inherit; font-size: .86rem; font-weight: 700; }
+    button:hover { background: var(--accent); }
+    .flash-success, .flash-error { padding: .72rem .9rem; border: 1px solid; border-radius: 9px; font-size: .86rem; }
+    .flash-success { border-color: #286448; color: var(--accent); background: #11271e; }
+    .flash-error { border-color: #6b3540; color: var(--danger); background: #2a1920; }
+    @media (max-width: 560px) { body { padding: 0 1rem 2rem; } .topbar { min-height: 66px; margin-bottom: 1.6rem; } .config-grid { grid-template-columns: 1fr; } .section { padding: 1rem; } }
   </style>
 </head>
 <body>
-  <h1>Configuración</h1>
-  <p class="subtitle">Parámetros de riesgo · cambios aplicados en el siguiente tick</p>
-
-  <h2>Riesgo</h2>
-  <div id="config-form-container">
-    {{template "config-form" .}}
+  <div class="app-shell">
+    <header class="topbar">
+      <a href="/" class="brand">mi-bot</a>
+      <a href="/" class="nav-link">Volver al dashboard</a>
+    </header>
+    <main>
+      <section class="page-heading">
+        <p class="eyebrow">Control de exposición</p>
+        <h1>Configuración de riesgo</h1>
+        <p class="subtitle">Los cambios se aplican en el siguiente ciclo de los bots.</p>
+      </section>
+      <section class="section" aria-labelledby="risk-title">
+        <h2 id="risk-title">Límites y protección</h2>
+        <div id="config-form-container">
+          {{template "config-form" .}}
+        </div>
+      </section>
+    </main>
   </div>
-
-  <p style="margin-top:2rem;"><a href="/" style="color:var(--accent);">← Volver al dashboard</a></p>
 </body>
 </html>
 {{end}}

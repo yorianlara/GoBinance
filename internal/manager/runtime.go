@@ -128,26 +128,43 @@ func (r *BotRuntime) tick(ctx context.Context) {
 	capital, err := r.deps.Capital.CapitalUSDT(ctx)
 	if err != nil {
 		slog.Warn("tick: capital", "bot", bot.ID, "err", err)
+		r.notifyOrderRejected()
 		return
 	}
 
 	pending, err := r.deps.Registry.PendingExposureUSDT(map[string]float64{bot.Symbol: price})
 	if err != nil {
 		slog.Warn("tick: pending exposure", "bot", bot.ID, "err", err)
+		r.notifyOrderRejected()
 		return
 	}
 
 	for i := range props {
 		props[i].BotID = bot.ID
 
-		d := r.deps.RiskState.Evaluate(props[i], r.deps.ConfigStore, capital, price, pending)
+		if props[i].Side != domain.OrderSideBuy {
+			slog.Warn("tick: lado de orden no habilitado", "bot", bot.ID, "side", props[i].Side)
+			r.notifyOrderRejected()
+			continue
+		}
+
+		var botsAllocatedPct, strategyAllocatedPct float64
+		if r.deps.Allocations != nil {
+			botsAllocatedPct, strategyAllocatedPct = r.deps.Allocations.AllocationPercentages(bot.Strategy.Type)
+		}
+		d := r.deps.RiskState.EvaluateWithAllocations(
+			props[i], r.deps.ConfigStore, capital, price, pending,
+			botsAllocatedPct, strategyAllocatedPct,
+		)
 		if !d.Approved {
 			slog.Info("tick: rechazada", "bot", bot.ID, "symbol", props[i].Symbol, "reason", d.Reason)
+			r.notifyOrderRejected()
 			continue
 		}
 		clientOrderID, err := r.deps.Registry.Reserve(props[i])
 		if err != nil {
 			slog.Warn("tick: reserve", "bot", bot.ID, "err", err)
+			r.notifyOrderRejected()
 			continue
 		}
 		slog.Info("tick: reservada",
@@ -172,7 +189,7 @@ func (r *BotRuntime) tick(ctx context.Context) {
 			if errMark := r.deps.Registry.MarkFailed(clientOrderID); errMark != nil {
 				slog.Warn("tick: mark failed", "bot", bot.ID, "err", errMark)
 			}
-			r.notifyOrderClosed()
+			r.notifyOrderClosed(false)
 			continue
 		}
 		if err := r.deps.Registry.MarkSubmitted(clientOrderID, resp.OrderID); err != nil {

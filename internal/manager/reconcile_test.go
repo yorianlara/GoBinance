@@ -305,7 +305,8 @@ func (g *gridLikeStrategy) Type() string { return "fake-grid" }
 func (g *gridLikeStrategy) Evaluate(ctx context.Context, data bots.MarketData) ([]domain.OrderProposal, error) {
 	return nil, nil
 }
-func (g *gridLikeStrategy) OnOrderClosed() {
+func (g *gridLikeStrategy) OnOrderRejected() {}
+func (g *gridLikeStrategy) OnOrderClosed(_ bool) {
 	g.mu.Lock()
 	g.closed++
 	g.mu.Unlock()
@@ -401,4 +402,5 @@ func (c *comboStrategy) Evaluate(ctx context.Context, data bots.MarketData) ([]d
 	c.used = true
 	return c.props, nil
 }
-func (c *comboStrategy) OnOrderClosed() { c.grid.OnOrderClosed() }
+func (c *comboStrategy) OnOrderRejected()          { c.grid.OnOrderRejected() }
+func (c *comboStrategy) OnOrderClosed(filled bool) { c.grid.OnOrderClosed(filled) }

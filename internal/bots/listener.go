@@ -1,8 +1,8 @@
 package bots
 
-// OrderLifecycleListener es una interfaz opcional que las estrategias
-// pueden implementar para enterarse de que una orden suya se ha cerrado
-// (filled, cancelled o failed). Grid la usa para permitir la siguiente.
+// OrderLifecycleListener permite a las estrategias sincronizar su estado
+// interno con la aceptación, rechazo y cierre de sus órdenes.
 type OrderLifecycleListener interface {
-	OnOrderClosed()
+	OnOrderRejected()
+	OnOrderClosed(filled bool)
 }

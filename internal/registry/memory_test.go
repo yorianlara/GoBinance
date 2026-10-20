@@ -148,3 +148,47 @@ func TestMemoryGetAndList(t *testing.T) {
 		t.Fatalf("List: %d", len(list))
 	}
 }
+
+func TestMemoryListActiveByBot(t *testing.T) {
+	r := NewMemory()
+	active, _ := r.Reserve(proposal("bot1", "BTCUSDT", 0.1))
+	submitted, _ := r.Reserve(proposal("bot1", "ETHUSDT", 1))
+	_, _ = r.Reserve(proposal("bot2", "BTCUSDT", 0.2))
+	closed, _ := r.Reserve(proposal("bot1", "SOLUSDT", 2))
+	_ = r.MarkCancelled(closed)
+	_ = r.MarkSubmitted(submitted, 123)
+
+	orders, err := r.ListActiveByBot("bot1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 2 {
+		t.Fatalf("esperadas 2 órdenes activas, hay %d", len(orders))
+	}
+	if orders[0].ClientOrderID != active || orders[1].ClientOrderID != submitted {
+		t.Fatalf("ordenes activas inesperadas: %+v", orders)
+	}
+}
+
+func TestMemoryRecentReturnsNewestLimited(t *testing.T) {
+	r := NewMemory()
+	first, _ := r.Reserve(proposal("bot1", "BTCUSDT", 0.1))
+	time.Sleep(time.Millisecond)
+	second, _ := r.Reserve(proposal("bot2", "ETHUSDT", 1))
+	time.Sleep(time.Millisecond)
+	third, _ := r.Reserve(proposal("bot3", "SOLUSDT", 2))
+
+	orders, err := r.Recent(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 2 || orders[0].ClientOrderID != third || orders[1].ClientOrderID != second {
+		t.Fatalf("órdenes recientes inesperadas: %+v (primera antigua %s)", orders, first)
+	}
+}
+
+func TestMemoryRecentRejectsInvalidLimit(t *testing.T) {
+	if _, err := NewMemory().Recent(0); err == nil {
+		t.Fatal("se esperaba error con limit 0")
+	}
+}
