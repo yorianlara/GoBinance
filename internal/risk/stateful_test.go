@@ -177,3 +177,53 @@ func TestStatefulManagerOnOrderCancelledNoOp(t *testing.T) {
 			before.OpenPositions, after.OpenPositions)
 	}
 }
+
+func TestStatefulManagerReconcileExposureDropsOrphans(t *testing.T) {
+	sm, _ := newStatefulMgr(t, NewState())
+	sm.OnOrderFilled("BTCUSDT", 100)
+	sm.OnOrderFilled("BTCUSDT", 50)
+	sm.OnOrderFilled("ETHUSDT", 60)
+	sm.OnPositionClosed("BTCUSDT", 100, 5)
+
+	// Estado con drifte: 2 posiciones y 110 USDT de exposición, aunque el
+	// registro reconstruido solo refleja 1 posición y 50 USDT.
+	st := sm.State()
+	if st.OpenPositions != 2 || st.ExposureTotalUSDT != 110 {
+		t.Fatalf("preparación inesperada: %+v", st)
+	}
+
+	before, changed := sm.ReconcileExposure(map[string]float64{"BTCUSDT": 50}, 1)
+	if !changed {
+		t.Fatal("se esperaba que la reconciliación detectara el drifte")
+	}
+	if before.OpenPositions != 2 || before.ExposureTotalUSDT != 110 {
+		t.Fatalf("estado anterior inesperado: %+v", before)
+	}
+	after := sm.State()
+	if after.OpenPositions != 1 || after.ExposureBySymbol["BTCUSDT"] != 50 {
+		t.Fatalf("el drifte debe eliminarse: %+v", after)
+	}
+	if _, hasETH := after.ExposureBySymbol["ETHUSDT"]; hasETH {
+		t.Fatalf("la exposición huérfana de ETHUSDT debe desaparecer: %+v", after.ExposureBySymbol)
+	}
+	if after.TotalPnL != 5 || after.DailyPnL != 5 {
+		t.Fatalf("el PnL debe conservarse: %+v", after)
+	}
+}
+
+func TestStatefulManagerReconcileExposureIsIdempotent(t *testing.T) {
+	sm, _ := newStatefulMgr(t, NewState())
+	sm.OnOrderFilled("BTCUSDT", 100)
+
+	_, changed := sm.ReconcileExposure(map[string]float64{"BTCUSDT": 100}, 1)
+	if changed {
+		t.Fatal("la reconciliación con el estado real debe ser idempotente (sin cambios la 1ª vez)")
+	}
+	_, changed = sm.ReconcileExposure(map[string]float64{"BTCUSDT": 100}, 1)
+	if changed {
+		t.Fatal("la reconciliación repetida no debe marcar cambios")
+	}
+	if st := sm.State(); st.OpenPositions != 1 || st.ExposureTotalUSDT != 100 {
+		t.Fatalf("estado debe conservarse: %+v", st)
+	}
+}

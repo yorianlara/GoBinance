@@ -6,14 +6,61 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"mi-bot/internal/domain"
 
 	"github.com/binance/binance-connector-go/clients/spot/src/restapi/models"
+	"github.com/binance/binance-connector-go/common/v2/common"
 )
 
 var ErrOrderSubmissionUncertain = errors.New("resultado del envío de la orden incierto")
+
+// ErrOrderNotFound informa que el exchange confirmó que NO existe una orden
+// para el clientOrderID consultado. Solo se devuelve tras una respuesta
+// explícita de Binance (HTTP 400, código -2013).
+var ErrOrderNotFound = errors.New("la orden no existe en el exchange")
+
+// errorIsAmbiguous clasifica un error de PlaceOrder: devuelve true cuando el
+// fallo no permite afirmar que la orden no exista en el exchange. Solo los
+// rechazos HTTP explícitos del exchange (400/401/403/404/418/429, etc.) son
+// definitivos; los errores de red o de servidor (que además disparan
+// reintentos del SDK) pueden haber dejado la orden creada.
+func errorIsAmbiguous(err error) bool {
+	var networkErr *common.NetworkError
+	var serverErr *common.ServerError
+	if errors.As(err, &networkErr) || errors.As(err, &serverErr) {
+		return true
+	}
+
+	var badRequest *common.BadRequestError
+	var unauthorized *common.UnauthorizedError
+	var forbidden *common.ForbiddenError
+	var notFound *common.NotFoundError
+	var rateLimitBan *common.RateLimitBanError
+	var tooManyRequests *common.TooManyRequestsError
+	if errors.As(err, &badRequest) || errors.As(err, &unauthorized) || errors.As(err, &forbidden) ||
+		errors.As(err, &notFound) || errors.As(err, &rateLimitBan) || errors.As(err, &tooManyRequests) {
+		// El exchange procesó la petición y respondió un rechazo definitivo:
+		// la orden no fue creada.
+		return false
+	}
+
+	// Errores del conector o cualquier otro (decodificación, gzip, peticiones
+	// mal construidas...): sin certezas, se tratan como ambiguos.
+	return true
+}
+
+// orderDoesNotExist detecta la respuesta canónica de Binance para una orden
+// inexistente: HTTP 400 con el código -2013 ("Order does not exist.").
+func orderDoesNotExist(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Order does not exist") || strings.Contains(msg, `"code":-2013`)
+}
 
 // OrderRequest es la petición de nueva orden.
 type OrderRequest struct {
@@ -84,18 +131,31 @@ func (b *BinanceClient) PlaceOrder(ctx context.Context, req OrderRequest) (Order
 	if qty < filters.MinQty {
 		return OrderResponse{}, fmt.Errorf("cantidad %v < mínimo %v para %s", qty, filters.MinQty, req.Symbol)
 	}
-	if req.Type == domain.OrderTypeMarket {
-		price := req.LimitPrice
-		if price <= 0 {
+
+	// Precio de referencia para el precio a enviar y para validar minNotional:
+	// el límite redondeado en órdenes limit, el actual en market.
+	priceRef := req.LimitPrice
+	switch req.Type {
+	case domain.OrderTypeLimit:
+		if filters.TickSize > 0 {
+			// Binance valida el precio contra PRICE_FILTER (tickSize): sin
+			// redondear, una rejilla con precios de decimales raros sería
+			// rechazada en cada tick y la orden nunca llegaría al book.
+			priceRef = truncateToStep(req.LimitPrice, filters.TickSize)
+		}
+		if priceRef <= 0 {
+			return OrderResponse{}, fmt.Errorf("precio límite inválido tras aplicar tickSize de %s", req.Symbol)
+		}
+	case domain.OrderTypeMarket:
+		if priceRef <= 0 {
 			// Para market, usamos el precio actual para validar minNotional.
-			p, err := b.GetSymbolPrice(ctx, req.Symbol)
-			if err == nil {
-				price = p
+			if p, err := b.GetSymbolPrice(ctx, req.Symbol); err == nil {
+				priceRef = p
 			}
 		}
-		if price > 0 && qty*price < filters.MinNotional {
-			return OrderResponse{}, fmt.Errorf("valor %v < minNotional %v para %s", qty*price, filters.MinNotional, req.Symbol)
-		}
+	}
+	if filters.MinNotional > 0 && priceRef > 0 && qty*priceRef < filters.MinNotional {
+		return OrderResponse{}, fmt.Errorf("valor %v < minNotional %v para %s", qty*priceRef, filters.MinNotional, req.Symbol)
 	}
 
 	builder := b.client.RestApi.TradeAPI.NewOrder(ctx).
@@ -106,7 +166,7 @@ func (b *BinanceClient) PlaceOrder(ctx context.Context, req OrderRequest) (Order
 
 	if req.Type == domain.OrderTypeLimit {
 		builder = builder.
-			Price(req.LimitPrice).
+			Price(priceRef).
 			TimeInForce(models.NewOrderTimeInForceParameterGtc)
 	}
 	if req.ClientOrderID != "" {
@@ -115,7 +175,15 @@ func (b *BinanceClient) PlaceOrder(ctx context.Context, req OrderRequest) (Order
 
 	resp, err := builder.Execute()
 	if err != nil {
-		return OrderResponse{}, fmt.Errorf("enviar orden: %w: %w", ErrOrderSubmissionUncertain, err)
+		if errorIsAmbiguous(err) {
+			// No se puede afirmar que la orden no exista: la petición pudo
+			// llegar a crearse (red que cayó antes de la respuesta, error de
+			// servidor tras reintentos, respuesta corrupta...). El llamador
+			// debe consultar al exchange antes de liberar la reserva.
+			return OrderResponse{}, fmt.Errorf("enviar orden: %w: %w", ErrOrderSubmissionUncertain, err)
+		}
+		// El exchange respondió con un rechazo definitivo: la orden no existe.
+		return OrderResponse{}, fmt.Errorf("enviar orden: %w", err)
 	}
 	if resp == nil {
 		return OrderResponse{}, fmt.Errorf("%w: respuesta de orden vacía", ErrOrderSubmissionUncertain)
@@ -150,6 +218,43 @@ func (b *BinanceClient) GetOrder(ctx context.Context, symbol string, orderID int
 	}
 	if resp == nil {
 		return OrderResponse{}, fmt.Errorf("respuesta de orden vacía")
+	}
+
+	return OrderResponse{
+		OrderID:             resp.Data.GetOrderId(),
+		ClientOrderID:       resp.Data.GetClientOrderId(),
+		Symbol:              resp.Data.GetSymbol(),
+		Status:              resp.Data.GetStatus(),
+		ExecutedQty:         parseFloatSafe(resp.Data.GetExecutedQty()),
+		CummulativeQuoteQty: parseFloatSafe(resp.Data.GetCummulativeQuoteQty()),
+		Price:               parseFloatSafe(resp.Data.GetPrice()),
+	}, nil
+}
+
+// GetOrderByClientID consulta una orden por su clientOrderID
+// (origClientOrderId en Binance). Si el exchange confirma que la orden no
+// existe devuelve ErrOrderNotFound; cualquier otro fallo se reporta tal cual
+// porque no permite afirmar nada sobre la orden.
+func (b *BinanceClient) GetOrderByClientID(ctx context.Context, symbol, clientOrderID string) (OrderResponse, error) {
+	if b == nil || b.client == nil || b.client.RestApi == nil {
+		return OrderResponse{}, fmt.Errorf("el cliente de Binance no está inicializado")
+	}
+	if symbol == "" || clientOrderID == "" {
+		return OrderResponse{}, fmt.Errorf("symbol y clientOrderID son obligatorios")
+	}
+
+	resp, err := b.client.RestApi.AccountAPI.GetOrder(ctx).
+		Symbol(symbol).
+		OrigClientOrderId(clientOrderID).
+		Execute()
+	if err != nil {
+		if orderDoesNotExist(err) {
+			return OrderResponse{}, fmt.Errorf("consultar orden %q en %s: %w", clientOrderID, symbol, ErrOrderNotFound)
+		}
+		return OrderResponse{}, fmt.Errorf("consultar orden %q en %s: %w", clientOrderID, symbol, err)
+	}
+	if resp == nil {
+		return OrderResponse{}, fmt.Errorf("respuesta de orden vacía para %q", clientOrderID)
 	}
 
 	return OrderResponse{

@@ -19,6 +19,7 @@ const (
 	DefaultKlineInterval     = "1m"
 	DefaultKlineLimit        = 100
 	orderCancellationTimeout = 10 * time.Second
+	liquidationTimeout       = 60 * time.Second
 )
 
 type BotRuntime struct {
@@ -68,8 +69,8 @@ func (r *BotRuntime) Start(parent context.Context) error {
 	defer r.actionMu.Unlock()
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.bot.Status == domain.BotStatusRunning {
+		r.mu.Unlock()
 		return nil
 	}
 	ctx, cancel := context.WithCancel(parent)
@@ -80,7 +81,10 @@ func (r *BotRuntime) Start(parent context.Context) error {
 	r.done = done
 	r.bot.Status = domain.BotStatusRunning
 	r.bot.UpdatedAt = time.Now()
+	r.mu.Unlock()
 	go r.run(ctx, ticker, done)
+
+	r.deps.notifyPersistBots()
 	return nil
 }
 
@@ -197,10 +201,32 @@ func (r *BotRuntime) tick(ctx context.Context) {
 		})
 		if err != nil {
 			slog.Warn("tick: place order", "bot", bot.ID, "client_order_id", clientOrderID, "err", err)
+			if errors.Is(err, exchange.ErrOrderSubmissionUncertain) {
+				// El resultado del envío se perdió (red, error de servidor tras
+				// reintentos...): confirmar al exchange qué fue de la orden
+				// antes de liberar la reserva.
+				r.resolveUncertainOutcome(ctx, registry.TrackedOrder{
+					ClientOrderID: clientOrderID,
+					Proposal:      props[i],
+					State:         registry.StateReserved,
+				})
+				continue
+			}
 			if errMark := r.deps.Registry.MarkFailed(clientOrderID); errMark != nil {
 				slog.Warn("tick: mark failed", "bot", bot.ID, "err", errMark)
 			}
 			r.notifyOrderClosed(false)
+			continue
+		}
+		if resp.OrderID <= 0 {
+			// El exchange respondió sin ID fiable: consultar por clientOrderID
+			// para reclamar la orden real o liberar la reserva.
+			slog.Warn("tick: respuesta sin ID de orden válido", "bot", bot.ID, "client_order_id", clientOrderID)
+			r.resolveUncertainOutcome(ctx, registry.TrackedOrder{
+				ClientOrderID: clientOrderID,
+				Proposal:      props[i],
+				State:         registry.StateReserved,
+			})
 			continue
 		}
 		if err := r.deps.Registry.MarkSubmitted(clientOrderID, resp.OrderID); err != nil {
@@ -220,7 +246,41 @@ func (r *BotRuntime) tick(ctx context.Context) {
 }
 
 func (r *BotRuntime) Pause() error { return r.stopAndSet(domain.BotStatusPaused) }
-func (r *BotRuntime) Stop() error  { return r.stopAndSet(domain.BotStatusStopped) }
+
+// Stop detiene el bot: cancela sus órdenes pendientes en el exchange y vende
+// la posición abierta (los lotes registrados por órdenes de compra finaledas)
+// para que no queden lotes por cerrar ni órdenes activas. Con executor nulo
+// (modo solo-reservar, pruebas) solo detiene el runtime.
+//
+// Devuelve el resultado de la liquidación y el error acumulado de cancelación
+// y venta. Un bot recién detenido sin actividad devuelve NoPosition y nil.
+func (r *BotRuntime) Stop() (PositionCloseResult, error) {
+	r.actionMu.Lock()
+	defer r.actionMu.Unlock()
+
+	bot := r.Bot()
+	result := PositionCloseResult{BotID: bot.ID, Symbol: bot.Symbol}
+	if err := r.stopAndSetLocked(domain.BotStatusStopped); err != nil {
+		return result, fmt.Errorf("detener el bot y cancelar sus órdenes pendientes: %w", err)
+	}
+	if r.deps.Executor == nil {
+		// Sin ejecutor no hay orden abierta ni posición en el exchange.
+		result.NoPosition = true
+		return result, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), liquidationTimeout)
+	defer cancel()
+	return r.liquidatePosition(ctx, bot.Symbol)
+}
+
+// stopOnly detiene el runtime y cancela las órdenes pendientes sin liquidar
+// la posición; se usa cuando la venta se hace por símbolo aparte, como en el
+// cierre global de posiciones.
+func (r *BotRuntime) stopOnly() error {
+	r.actionMu.Lock()
+	defer r.actionMu.Unlock()
+	return r.stopAndSetLocked(domain.BotStatusStopped)
+}
 
 func (r *BotRuntime) stopAndSet(next domain.BotStatus) error {
 	r.actionMu.Lock()
@@ -255,7 +315,19 @@ func (r *BotRuntime) stopAndSetLocked(next domain.BotStatus) error {
 	if done != nil {
 		<-done
 	}
+
+	r.deps.notifyPersistBots()
 	return cancelErr
+}
+
+// cancelPendingOrders cancela en el exchange las órdenes pendientes
+// (reserved/submitted) del bot, contabilizando fills parciales, SIN alterar
+// el estado del runtime (no detiene ticks ni toca la liquidación). Toma
+// tickMu para que ningún tick en vuelo compita con las cancelaciones.
+func (r *BotRuntime) cancelPendingOrders(botID string) error {
+	r.tickMu.Lock()
+	defer r.tickMu.Unlock()
+	return r.cancelSubmittedOrders(botID)
 }
 
 func (r *BotRuntime) cancelSubmittedOrders(botID string) error {
@@ -269,7 +341,30 @@ func (r *BotRuntime) cancelSubmittedOrders(botID string) error {
 
 	var cancelErrs []error
 	for _, order := range orders {
-		if order.State != registry.StateSubmitted {
+		switch order.State {
+		case registry.StateReserved:
+			// Reserva de resultado incierto: confirmar con el exchange qué fue
+			// de la orden antes de terminar. Si quedó submitted (la orden
+			// existe) sigue el flujo normal de cancelación; si se liberó o se
+			// contabilizó como fill ya quedó registrado por
+			// resolveUncertainOutcome; si no se pudo confirmar se conserva y
+			// se avisa, para resolverla en un tick futuro.
+			resolved, settled := r.settleReservedForStop(ctx, order)
+			if !settled {
+				cancelErrs = append(cancelErrs, fmt.Errorf(
+					"no se pudo confirmar en el exchange la orden reservada %q; se conserva su reserva para no duplicar la operación",
+					order.ClientOrderID,
+				))
+				continue
+			}
+			if resolved.State != registry.StateSubmitted {
+				// failed/cancelled/filled: ya contabilizada, no hay nada que cancelar.
+				continue
+			}
+			order = resolved
+		case registry.StateSubmitted:
+			// Flujo normal de cancelación.
+		default:
 			continue
 		}
 		if r.deps.Executor == nil {
@@ -277,21 +372,35 @@ func (r *BotRuntime) cancelSubmittedOrders(botID string) error {
 			continue
 		}
 
+		var finalOrder exchange.OrderResponse
 		err := r.deps.Executor.CancelOrder(ctx, order.Proposal.Symbol, order.ExchangeID)
-		if err != nil {
-			slog.Warn("bot: cancelar orden", "bot", botID, "client_order_id", order.ClientOrderID, "err", err)
-			cancelErrs = append(cancelErrs, fmt.Errorf("cancelar orden %q en el exchange: %w", order.ClientOrderID, err))
-			continue
+		if err == nil {
+			finalOrder, err = r.deps.Executor.GetOrder(ctx, order.Proposal.Symbol, order.ExchangeID)
+			if err != nil {
+				slog.Warn("bot: verificar cancelación", "bot", botID, "client_order_id", order.ClientOrderID, "err", err)
+				cancelErrs = append(cancelErrs, fmt.Errorf("verificar cancelación de orden %q: %w", order.ClientOrderID, err))
+				continue
+			}
+		} else {
+			// La cancelación puede fallar porque la orden ya terminó por su
+			// cuenta, como ocurre al parar tras una compra market que llena
+			// en instantes: consultar el estado real antes de dar la orden
+			// por incancelable para no dejarla atascada como submitted.
+			var queryErr error
+			finalOrder, queryErr = r.deps.Executor.GetOrder(ctx, order.Proposal.Symbol, order.ExchangeID)
+			if queryErr != nil || !isTerminalOrderStatus(finalOrder.Status) {
+				slog.Warn("bot: cancelar orden", "bot", botID, "client_order_id", order.ClientOrderID,
+					"err", err, "query_err", queryErr, "status", finalOrder.Status)
+				cancelErrs = append(cancelErrs, fmt.Errorf(
+					"cancelar orden %q en el exchange (%v) y su estado sigue sin confirmarse (consulta: %v, estado: %q)",
+					order.ClientOrderID, err, queryErr, finalOrder.Status,
+				))
+				continue
+			}
+			slog.Info("bot: orden ya terminada en el exchange; se registra su resultado",
+				"bot", botID, "client_order_id", order.ClientOrderID, "status", finalOrder.Status)
 		}
-		finalOrder, err := r.deps.Executor.GetOrder(ctx, order.Proposal.Symbol, order.ExchangeID)
-		if err != nil {
-			slog.Warn("bot: verificar cancelación", "bot", botID, "client_order_id", order.ClientOrderID, "err", err)
-			cancelErrs = append(cancelErrs, fmt.Errorf("verificar cancelación de orden %q: %w", order.ClientOrderID, err))
-			continue
-		}
-		switch finalOrder.Status {
-		case "CANCELED", "EXPIRED", "REJECTED":
-		default:
+		if !isTerminalOrderStatus(finalOrder.Status) {
 			cancelErrs = append(cancelErrs, fmt.Errorf(
 				"Binance no confirmó la cancelación de la orden %q; estado final %q",
 				order.ClientOrderID, finalOrder.Status,
@@ -314,11 +423,11 @@ func (r *BotRuntime) cancelSubmittedOrders(botID string) error {
 			}
 			if err := r.recordExecution(ctx, botID, order, quantity, value); err != nil {
 				cancelErrs = append(cancelErrs, fmt.Errorf(
-					"registrar ejecución parcial de orden %q: %w", order.ClientOrderID, err,
+					"registrar ejecución de orden %q: %w", order.ClientOrderID, err,
 				))
 				continue
 			}
-			slog.Info("bot: orden parcialmente ejecutada al detener",
+			slog.Info("bot: orden ejecutada al detener (parcial o total)",
 				"bot", botID, "client_order_id", order.ClientOrderID,
 				"executed_qty", quantity, "value_usdt", value)
 			continue
@@ -331,6 +440,31 @@ func (r *BotRuntime) cancelSubmittedOrders(botID string) error {
 		slog.Info("bot: orden cancelada al detener", "bot", botID, "client_order_id", order.ClientOrderID, "exchange_order_id", order.ExchangeID)
 	}
 	return errors.Join(cancelErrs...)
+}
+
+// settleReservedForStop intenta resolver una reserva huérfana antes de parar
+// el bot: pregunta al exchange (vía resolveUncertainOutcome) si la orden
+// existe. Devuelve la orden refrescada y true cuando su resultado quedó
+// conocido y contabilizado en el registro (failed/cancelled/filled, o
+// submitted lista para el flujo de cancelación). Devuelve false solo si el
+// resultado sigue sin poder confirmarse (la reserva permanece).
+func (r *BotRuntime) settleReservedForStop(ctx context.Context, o registry.TrackedOrder) (registry.TrackedOrder, bool) {
+	if r.deps.Executor == nil {
+		return o, false
+	}
+	r.resolveUncertainOutcome(ctx, o)
+	refreshed, ok := r.deps.Registry.Get(o.ClientOrderID)
+	if !ok {
+		return o, false
+	}
+	switch refreshed.State {
+	case registry.StateReserved:
+		// El exchange no fue alcanzable o no respondió con certeza: la
+		// reserva permanece para una resolución futura.
+		return refreshed, false
+	default:
+		return refreshed, true
+	}
 }
 
 func (r *BotRuntime) WaitDone() error {

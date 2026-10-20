@@ -134,3 +134,44 @@ func TestGridPriceOutOfRange(t *testing.T) {
 		t.Fatalf("fuera de rejilla no debe proponer, hay %d", len(props))
 	}
 }
+
+func TestGridFractionalDropTargetsNearestLowerLevel(t *testing.T) {
+	// Con una caída fraccional (-2.7%) la orden debe apuntar al nivel
+	// inferior más cercano (-3% → 97), no a -2% (98, por encima del precio
+	// actual: Binance la ejecutaría como taker inmediato).
+	g := newGrid(t, 5, 1, 10)
+	g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 100})
+	props, err := g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 97.3})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if len(props) != 1 {
+		t.Fatalf("se esperaba 1, hay %d", len(props))
+	}
+	if props[0].LimitPrice != 97 {
+		t.Fatalf("limit_price: %v (esperado 97: nivel -3)", props[0].LimitPrice)
+	}
+}
+
+func TestGridRecenterKeepsOpenOrderTracked(t *testing.T) {
+	// Al recentrar, una orden límite aún viva en el exchange debe seguir
+	// bloqueando nuevas propuestas; olvidarla duplicaría la posición.
+	g := newGrid(t, 3, 1, 10)
+	g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 100})
+	props, _ := g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 97})
+	if len(props) != 1 {
+		t.Fatalf("se esperaba la orden inicial, hay %d", len(props))
+	}
+	// -20% → recentra al 80, pero la orden sigue abierta: nada que proponer.
+	props, _ = g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 80})
+	if len(props) != 0 {
+		t.Fatalf("recentrar no debe olvidar la orden abierta, hay %d", len(props))
+	}
+	// La orden del exchange se cierra (fill/cancel): se libera el gate.
+	g.OnOrderClosed(true)
+	// -1% del nuevo centro 80 → propone de nuevo.
+	props, _ = g.Evaluate(context.Background(), MarketData{Symbol: "BTCUSDT", Price: 79})
+	if len(props) != 1 {
+		t.Fatalf("tras cerrar la orden y recentrar debe proponer, hay %d", len(props))
+	}
+}

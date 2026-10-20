@@ -1,10 +1,11 @@
 package web
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/session"
@@ -28,15 +29,26 @@ func loadAuthConfig() authConfig {
 	}
 }
 
-// newSessionStore crea el store de sesiones respaldado por PostgreSQL.
-func newSessionStore(dbURL string) (*session.Store, error) {
+// sessionStoreFromDB construye el store de sesiones con la URL de DATABASE_URL.
+// La cookie de sesión se marca HttpOnly (no legible desde JavaScript) y
+// SameSite=Lax (los navegadores no la envían en POST cross-site), endureciendo
+// el dashboard frente a robo de sesión y CSRF.
+func sessionStoreFromDB() (*session.Store, error) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		return nil, fmt.Errorf("DATABASE_URL no definida; no se puede usar sesiones con PostgreSQL")
+	}
+	// El driver de gofiber/storage/postgres/v3 espera un pgxpool o ConnectionURI.
+	// Usamos ConnectionURI directamente.
 	storage := postgres.New(postgres.Config{
 		ConnectionURI: dbURL,
 		Table:         "fiber_sessions",
 	})
 	store := session.New(session.Config{
-		Storage:    storage,
-		Expiration: 24 * 60 * 60 * 1000 * 1000 * 1000, // 24h en ns
+		Storage:        storage,
+		Expiration:     24 * time.Hour,
+		CookieHTTPOnly: true,
+		CookieSameSite: "Lax",
 	})
 	return store, nil
 }
@@ -74,7 +86,9 @@ func (s *Server) handleLoginPage(c *fiber.Ctx) error {
 	return s.renderLogin(c, "")
 }
 
-// handleLoginSubmit valida credenciales y crea la sesión.
+// handleLoginSubmit valida credenciales y crea la sesión. La comparación es
+// en tiempo constante para no filtrar por timing la longitud o los caracteres
+// acertados de usuario/contraseña.
 func (s *Server) handleLoginSubmit(c *fiber.Ctx) error {
 	if !s.auth.Enabled {
 		return c.Redirect("/")
@@ -82,7 +96,10 @@ func (s *Server) handleLoginSubmit(c *fiber.Ctx) error {
 	user := c.FormValue("user")
 	pass := c.FormValue("password")
 
-	if user != s.auth.User || pass != s.auth.Password {
+	okUser := subtle.ConstantTimeCompare([]byte(user), []byte(s.auth.User)) == 1
+	okPass := subtle.ConstantTimeCompare([]byte(pass), []byte(s.auth.Password)) == 1
+
+	if !okUser || !okPass {
 		slog.Warn("auth: login rechazado", "username", user)
 		return s.renderLogin(c, "Usuario o contraseña incorrectos")
 	}
@@ -118,24 +135,3 @@ func (s *Server) renderLogin(c *fiber.Ctx, errMsg string) error {
 	c.Set("Content-Type", "text/html; charset=utf-8")
 	return s.pages.ExecuteTemplate(c, "login", map[string]any{"Error": errMsg})
 }
-
-// sessionStoreFromDB construye el store de sesiones con la URL de DATABASE_URL.
-func sessionStoreFromDB() (*session.Store, error) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		return nil, fmt.Errorf("DATABASE_URL no definida; no se puede usar sesiones con PostgreSQL")
-	}
-	// El driver de gofiber/storage/postgres/v3 espera un pgxpool o ConnectionURI.
-	// Usamos ConnectionURI directamente.
-	storage := postgres.New(postgres.Config{
-		ConnectionURI: dbURL,
-		Table:         "fiber_sessions",
-	})
-	store := session.New(session.Config{
-		Storage: storage,
-	})
-	return store, nil
-}
-
-// helper para no importar strings si no se usa
-var _ = strings.TrimSpace

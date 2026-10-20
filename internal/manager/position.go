@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"mi-bot/internal/domain"
@@ -128,6 +129,12 @@ func (r *BotRuntime) ClosePositionFor(ctx context.Context, symbol string) (Posit
 	if err := r.stopAndSetLocked(domain.BotStatusStopped); err != nil {
 		return PositionCloseResult{}, fmt.Errorf("detener el bot y cancelar sus órdenes pendientes: %w", err)
 	}
+	return r.liquidatePosition(ctx, symbol)
+}
+
+// liquidatePosition vende el inventario registrado del bot en `symbol`.
+// Debe llamarse con el bot ya detenido (sin tick activo) y requiere executor.
+func (r *BotRuntime) liquidatePosition(ctx context.Context, symbol string) (PositionCloseResult, error) {
 	if r.deps.Executor == nil {
 		return PositionCloseResult{}, fmt.Errorf("no está configurado el ejecutor de órdenes")
 	}
@@ -299,6 +306,60 @@ func isTerminalOrderStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+// InventorySnapshot refleja la posición abierta de un bot en un símbolo,
+// reconstruida desde las órdenes del registro (la contabilidad autoritativa).
+type InventorySnapshot struct {
+	BotID         string
+	Symbol        string
+	Quantity      float64
+	CostBasisUSDT float64
+}
+
+// Inventories reconstruye todas las posiciones abiertas a partir del
+// registro de órdenes: por cada par bot/símbolo con lotes sin vender devuelve
+// la cantidad y su coste base. Devuelve error si algún par presenta una
+// contabilidad inconsistente (p. ej. ventas sin compras que las respalden),
+// en cuyo caso el llamador no debe fiarse de una reconstrucción parcial.
+func (m *BotManager) Inventories() ([]InventorySnapshot, error) {
+	orders, err := m.deps.Registry.List()
+	if err != nil {
+		return nil, fmt.Errorf("listar órdenes para inventarios: %w", err)
+	}
+
+	type pairKey struct{ botID, symbol string }
+	pairs := make(map[pairKey]struct{})
+	for _, order := range orders {
+		switch order.Proposal.Side {
+		case domain.OrderSideBuy, domain.OrderSideSell:
+			pairs[pairKey{order.Proposal.BotID, order.Proposal.Symbol}] = struct{}{}
+		}
+	}
+
+	snapshots := make([]InventorySnapshot, 0, len(pairs))
+	for pair := range pairs {
+		inventory, err := inventoryFor(orders, pair.botID, pair.symbol)
+		if err != nil {
+			return nil, fmt.Errorf("inventario del bot %q en %s: %w", pair.botID, pair.symbol, err)
+		}
+		if inventory.quantity() <= positionEpsilon {
+			continue
+		}
+		snapshots = append(snapshots, InventorySnapshot{
+			BotID:         pair.botID,
+			Symbol:        pair.symbol,
+			Quantity:      inventory.quantity(),
+			CostBasisUSDT: inventory.costBasis(),
+		})
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].BotID != snapshots[j].BotID {
+			return snapshots[i].BotID < snapshots[j].BotID
+		}
+		return snapshots[i].Symbol < snapshots[j].Symbol
+	})
+	return snapshots, nil
 }
 
 func trackedQuantityForAsset(ctx context.Context, orders []registry.TrackedOrder, executor OrderExecutor, asset string) (float64, error) {

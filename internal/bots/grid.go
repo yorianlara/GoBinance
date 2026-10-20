@@ -3,6 +3,7 @@ package bots
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -98,7 +99,10 @@ func (g *GridStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.
 	driftPct := (data.Price - g.center) / g.center * 100
 	if driftPct > maxDriftPct || driftPct < -maxDriftPct {
 		g.center = data.Price
-		g.hasOrder = false
+		// hasOrder se conserva: puede seguir viva una orden límite en el
+		// exchange; olvidarla permitiría proponer otra orden y duplicar la
+		// posición mientras la anterior siga abierta. El evento de ciclo de
+		// vida (fill/cancel) la liberará.
 		return nil, nil
 	}
 
@@ -106,13 +110,17 @@ func (g *GridStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.
 		return nil, nil
 	}
 
-	// Calcular cuántos niveles ha bajado/subido el precio respecto al centro.
+	// Calcular cuántos niveles ha bajado el precio respecto al centro.
+	// Floor (no truncamiento) porque con caídas fraccionales (p. ej. -2.7 %
+	// con spacing 1 %) el truncamiento hacia cero sitúa la orden por ENCIMA
+	// del precio actual y Binance la ejecutaría de inmediato como taker,
+	// adelantando la rejilla nivel a nivel.
 	stepPct := (data.Price - g.center) / g.center * 100
-	steps := int(stepPct / g.spacingPct)
+	steps := math.Floor(stepPct / g.spacingPct)
 
 	var level int
 	if steps < 0 {
-		level = steps // negativo
+		level = int(steps) // negativo
 	} else {
 		// No se habilitan ventas sin comprobar inventario disponible.
 		return nil, nil

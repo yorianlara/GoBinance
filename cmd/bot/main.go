@@ -50,6 +50,9 @@ func (b binanceExecutor) PlaceOrder(ctx context.Context, req exchange.OrderReque
 func (b binanceExecutor) GetOrder(ctx context.Context, symbol string, orderID int64) (exchange.OrderResponse, error) {
 	return b.client.GetOrder(ctx, symbol, orderID)
 }
+func (b binanceExecutor) GetOrderByClientID(ctx context.Context, symbol, clientOrderID string) (exchange.OrderResponse, error) {
+	return b.client.GetOrderByClientID(ctx, symbol, clientOrderID)
+}
 func (b binanceExecutor) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
 	return b.client.CancelOrder(ctx, symbol, orderID)
 }
@@ -192,7 +195,15 @@ func main() {
 		Executor:        executor,
 	}
 
-	botMgr, err := manager.New(deps)
+	// Persistencia incremental: guardamos bots.json tras cada cambio de
+	// catálogo o de estado, no solo al apagar, para no perder nada si el
+	// proceso muere.
+	var botMgr *manager.BotManager
+	deps.PersistBots = func() error {
+		return store.Save(botMgr.List())
+	}
+
+	botMgr, err = manager.New(deps)
 	if err != nil {
 		fatalf("Error al crear BotManager: %v", err)
 	}
@@ -208,6 +219,47 @@ func main() {
 		}
 	}
 	logger.Printf("Bots cargados desde disco: %d", len(storedBots))
+
+	// Barrido de arranque: si una ejecución anterior se cayó, sus órdenes
+	// pendientes podrían seguir vivas en Binance (reconcile solo las cancela
+	// tras max_order_age_minutes). Se neutralizan ahora, contabilizando
+	// fills parciales, sin cambiar el estado de los bots.
+	ctxSweep, cancelSweep := context.WithTimeout(context.Background(), 2*time.Minute)
+	swept, err := botMgr.CancelAllPendingOrders(ctxSweep)
+	cancelSweep()
+	if err != nil {
+		logger.Printf("Aviso: barrido de arranque de órdenes pendientes: %v", err)
+	} else if swept > 0 {
+		logger.Printf("Barrido de arranque: órdenes pendientes neutralizadas para %d bot(s)", swept)
+	}
+
+	// Reconciliación de riesgo desde el registro (la contabilidad
+	// autoritativa): recobrar exposición y posiciones abiertas para eliminar
+	// huérfanas acumuladas por registros perdidos o ventas hechas fuera del
+	// bot. Solo se ejecuta si TODO el registro es consistente.
+	snapshots, err := botMgr.Inventories()
+	if err != nil {
+		logger.Printf("Aviso: reconstruir inventarios desde el registro: %v", err)
+	} else {
+		exposureBySymbol := make(map[string]float64, len(snapshots))
+		openPositions := 0
+		for _, snapshot := range snapshots {
+			exposureBySymbol[snapshot.Symbol] += snapshot.CostBasisUSDT
+			openPositions++
+		}
+		before, changed := riskState.ReconcileExposure(exposureBySymbol, openPositions)
+		if changed {
+			total := 0.0
+			for _, v := range exposureBySymbol {
+				total += v
+			}
+			logger.Printf("Reconciliación de riesgo: posiciones abiertas %d → %d; exposición %.2f → %.2f USDT; cambiado risk-state.json",
+				before.OpenPositions, openPositions, before.ExposureTotalUSDT, total)
+			if err := riskState.Persist(); err != nil {
+				logger.Printf("Aviso: persistir estado de riesgo reconciliado: %v", err)
+			}
+		}
+	}
 
 	for _, id := range toEnable {
 		if err := botMgr.Enable(id); err != nil {
@@ -244,10 +296,54 @@ func main() {
 	sig := <-sigCh
 	logger.Printf("Señal recibida (%s), apagando...", sig)
 
+	// Una segunda señal corta el apagado en seco (salta la liquidación y el
+	// vaciado que quedara pendiente).
+	go func() {
+		second := <-sigCh
+		logger.Printf("Segunda señal (%s), cortando en seco...", second)
+		os.Exit(2)
+	}()
+
 	// Apagar servidor web antes que el manager.
 	if err := webServer.Shutdown(); err != nil {
 		logger.Printf("Aviso: shutdown web: %v", err)
 	}
+
+	// Cierre completo del proceso: cancelar en Binance las órdenes pendientes
+	// de todos los bots y liquidar todas las posiciones registradas, de modo
+	// que tras apagar no quede nada vivo (ni posiciones abiertas ni órdenes
+	// a la espera de max_order_age en el siguiente arranque).
+	ctxClose, cancelClose := context.WithTimeout(context.Background(), 4*time.Minute)
+	attempts, err := botMgr.CloseAllPositions(ctxClose)
+	cancelClose()
+	if err != nil {
+		logger.Printf("Aviso: cierre de posiciones al apagar: %v", err)
+	}
+	sold, partial, noPosition, failed := 0, 0, 0, 0
+	for _, attempt := range attempts {
+		switch {
+		case attempt.Err != nil:
+			failed++
+			logger.Printf("Aviso: liquidación al apagar %s/%s: vendidas %.8f; %v",
+				attempt.BotID, attempt.Symbol, attempt.Result.SoldQuantity, attempt.Err)
+			if attempt.Result.SoldQuantity > 0 {
+				partial++
+			}
+		case attempt.Result.NoPosition:
+			noPosition++
+		default:
+			if attempt.Result.Partial {
+				partial++
+			} else {
+				sold++
+			}
+			logger.Printf("Liquidación al apagar %s/%s: vendidas %.8f %s por %.2f USDT; PnL %+.2f USDT",
+				attempt.BotID, attempt.Symbol, attempt.Result.SoldQuantity, attempt.Symbol,
+				attempt.Result.ProceedsUSDT, attempt.Result.RealizedPnLUSDT)
+		}
+	}
+	logger.Printf("Cierre al apagar terminado: %d posición(es) vendida(s), %d parcial(es), %d sin posición y %d error(es).",
+		sold, partial, noPosition, failed)
 
 	botMgr.Shutdown()
 

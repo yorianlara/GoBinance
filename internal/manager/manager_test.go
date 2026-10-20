@@ -213,7 +213,7 @@ func TestManagerLifecycle(t *testing.T) {
 	if st, _ := m.Status("b1"); st != domain.BotStatusPaused {
 		t.Fatalf("estado: %q", st)
 	}
-	_ = m.StopBot("b1")
+	_, _ = m.StopBot("b1")
 	if st, _ := m.Status("b1"); st != domain.BotStatusStopped {
 		t.Fatalf("estado: %q", st)
 	}

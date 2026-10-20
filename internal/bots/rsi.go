@@ -24,7 +24,9 @@ type RSIStrategy struct {
 	overbought float64
 	sizeUSDT   float64
 
-	mu sync.Mutex
+	mu               sync.Mutex
+	pending          bool      // hay una propuesta en curso
+	lastSignalCandle time.Time // vela cuya señal ya se disparó: 1 compra por cruce
 }
 
 func NewRSIStrategy(cfg domain.StrategyConfig) (*RSIStrategy, error) {
@@ -62,6 +64,21 @@ func NewRSIStrategy(cfg domain.StrategyConfig) (*RSIStrategy, error) {
 
 func (r *RSIStrategy) Type() string { return "rsi" }
 
+// OnOrderRejected libera una propuesta que no llegó a convertirse en orden.
+func (r *RSIStrategy) OnOrderRejected() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pending = false
+}
+
+// OnOrderClosed marca el fin de una orden (rellenada o cancelada); la señal
+// concreta del cruce no se repetirá (la guarma lastSignalCandle).
+func (r *RSIStrategy) OnOrderClosed(_ bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pending = false
+}
+
 func (r *RSIStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.OrderProposal, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -94,8 +111,21 @@ func (r *RSIStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.O
 		return nil, nil
 	}
 
+	// Un disparo por cruce: mientras el cruce siga "fresco" en la misma vela
+	// no repetir, y el gate `pending` evita solapar dos propuestas mientras
+	// la primera espera su envío/cierre.
+	signalCandle := data.Candles[len(data.Candles)-1].OpenTime
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pending || signalCandle.Equal(r.lastSignalCandle) {
+		return nil, nil
+	}
+	r.pending = true
+	r.lastSignalCandle = signalCandle
+
 	qty := r.sizeUSDT / data.Price
 	if qty <= 0 {
+		r.pending = false
 		return nil, nil
 	}
 

@@ -16,6 +16,7 @@ type SymbolFilters struct {
 	MarketStepSize float64 // MARKET_LOT_SIZE (para market)
 	MinQty         float64
 	MinNotional    float64
+	TickSize       float64 // PRICE_FILTER (para el precio de órdenes limit)
 	BaseAsset      string
 }
 
@@ -55,6 +56,8 @@ func (b *BinanceClient) filtersFor(ctx context.Context, symbol string) (SymbolFi
 			if f.MinQty == 0 {
 				f.MinQty = parseFloatSafe(v.GetMinQty())
 			}
+		case *models.PriceFilter:
+			f.TickSize = parseFloatSafe(v.GetTickSize())
 		case *models.MinNotionalFilter:
 			f.MinNotional = parseFloatSafe(v.GetMinNotional())
 		case *models.NotionalFilter:
@@ -66,7 +69,13 @@ func (b *BinanceClient) filtersFor(ctx context.Context, symbol string) (SymbolFi
 		return SymbolFilters{}, fmt.Errorf("stepSize inválido para %s", symbol)
 	}
 
+	// Lazy init: clientes construidos a mano (tests o Paths nuevos) pueden
+	// llegar aquí sin el mapa inicializado; el panic de escribir en un mapa
+	// nil sería un fallo en plena ejecución de órdenes.
 	b.filtersMu.Lock()
+	if b.filters == nil {
+		b.filters = make(map[string]SymbolFilters)
+	}
 	b.filters[symbol] = f
 	b.filtersMu.Unlock()
 	return f, nil
@@ -77,8 +86,12 @@ func truncateToStep(value, step float64) float64 {
 	if step <= 0 {
 		return value
 	}
-	// Truncar hacia abajo
-	truncated := math.Floor(value/step) * step
+	// Truncar hacia abajo con tolerancia al ruido de float64 en la división
+	// (p. ej. 0.34567/0.00001 ≈ 34566.999999999996): un casi-entero desde
+	// abajo debe caer en el entero correcto, no en un paso inferior.
+	q := value / step
+	eps := math.Max(1e-9, math.Abs(q)*1e-12)
+	truncated := math.Floor(q+eps) * step
 
 	// Calcular cuántos decimales tiene el stepSize para redondear el ruido
 	// Convertimos el step a string para contar los decimales de forma segura.

@@ -1,6 +1,8 @@
 package manager
 
 import (
+	"log/slog"
+
 	"mi-bot/internal/bots"
 	"mi-bot/internal/config"
 	"mi-bot/internal/registry"
@@ -17,6 +19,22 @@ type Deps struct {
 	Market          MarketProvider
 	Klines          KlineProvider
 	Executor        OrderExecutor
+
+	// PersistBots, si no es nil, se invoca al cambiar el catálogo de bots o el
+	// estado de un bot (create/update/delete/enable/pause/stop) para que el
+	// llamador persista el estado (p. ej. bots.json). La persistencia es
+	// best-effort: los errores se registran y no interrumpen la operación.
+	PersistBots func() error
+}
+
+// notifyPersistBots llama a PersistBots si está configurada.
+func (d Deps) notifyPersistBots() {
+	if d.PersistBots == nil {
+		return
+	}
+	if err := d.PersistBots(); err != nil {
+		slog.Error("manager: persistir estado de bots tras un cambio", "err", err)
+	}
 }
 
 type AllocationProvider interface {

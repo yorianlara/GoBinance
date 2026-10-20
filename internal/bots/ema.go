@@ -22,8 +22,9 @@ type EMAStrategy struct {
 	slowPeriod int
 	sizeUSDT   float64
 
-	mu   sync.Mutex
-	last time.Time // última señal emitida (evita repetir en el mismo tick)
+	mu               sync.Mutex
+	pending          bool      // hay una propuesta en curso
+	lastSignalCandle time.Time // vela cuya señal ya se disparó: 1 compra por cruce
 }
 
 func NewEMAStrategy(cfg domain.StrategyConfig) (*EMAStrategy, error) {
@@ -52,6 +53,21 @@ func NewEMAStrategy(cfg domain.StrategyConfig) (*EMAStrategy, error) {
 }
 
 func (e *EMAStrategy) Type() string { return "ema" }
+
+// OnOrderRejected libera una propuesta que no llegó a convertirse en orden.
+func (e *EMAStrategy) OnOrderRejected() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pending = false
+}
+
+// OnOrderClosed marca el fin de una orden (rellenada o cancelada); la señal
+// concreta del cruce ya no se repetirá (la guarma lastSignalCandle).
+func (e *EMAStrategy) OnOrderClosed(_ bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pending = false
+}
 
 func (e *EMAStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.OrderProposal, error) {
 	if err := ctx.Err(); err != nil {
@@ -83,8 +99,22 @@ func (e *EMAStrategy) Evaluate(ctx context.Context, data MarketData) ([]domain.O
 		return nil, nil
 	}
 
+	// Un disparo por cruce: mientras el cruce siga "fresco" en la misma vela
+	// (los 5 s de tick recalculan lo mismo), no repetir. Exigir una vela
+	// nueva evita ametrallar compras; el gate `pending` evita sólapear dos
+	// propuestas mientras la primera espera su envío/cierre.
+	signalCandle := data.Candles[len(data.Candles)-1].OpenTime
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pending || signalCandle.Equal(e.lastSignalCandle) {
+		return nil, nil
+	}
+	e.pending = true
+	e.lastSignalCandle = signalCandle
+
 	qty := e.sizeUSDT / data.Price
 	if qty <= 0 {
+		e.pending = false
 		return nil, nil
 	}
 

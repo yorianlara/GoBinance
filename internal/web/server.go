@@ -20,6 +20,7 @@ import (
 	"mi-bot/internal/risk"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/gofiber/fiber/v2/middleware/session"
 )
 
@@ -125,7 +126,14 @@ func (s *Server) registerRoutes() {
 	// Públicas
 	s.app.Get("/health", func(c *fiber.Ctx) error { return c.SendString("ok") })
 	s.app.Get("/login", s.handleLoginPage)
-	s.app.Post("/login", s.handleLoginSubmit)
+
+	// Rate limit anti fuerza bruta en el login: máx. 10 intentos por IP y
+	// minuto; el middleware responde 429 al superarlo.
+	loginLimiter := limiter.New(limiter.Config{
+		Max:        10,
+		Expiration: time.Minute,
+	})
+	s.app.Post("/login", loginLimiter, s.handleLoginSubmit)
 
 	// Protegidas: middleware requireAuth
 	auth := requireAuth(s.auth, s.sessionStore)
@@ -369,12 +377,28 @@ func (s *Server) handlePause(c *fiber.Ctx) error {
 	return s.renderBotResults(c, "Bot pausado.", false)
 }
 func (s *Server) handleStop(c *fiber.Ctx) error {
-	if err := s.deps.Bots.StopBot(c.Params("id")); err != nil {
-		slog.Warn("web: stop", "err", err)
+	result, err := s.deps.Bots.StopBot(c.Params("id"))
+	if err != nil {
+		slog.Warn("web: stop", "bot", c.Params("id"), "sold_qty", result.SoldQuantity, "err", err)
+		if result.SoldQuantity > 0 {
+			message := fmt.Sprintf("Venta parcial al detener: %.8f %s por %.2f USDT; PnL realizado %.2f USDT. %v",
+				result.SoldQuantity, result.Symbol, result.ProceedsUSDT, result.RealizedPnLUSDT, err)
+			return s.renderBotResults(c, message, true)
+		}
 		return s.renderBotResults(c, err.Error(), true)
 	}
-	slog.Info("web: bot detenido", "bot", c.Params("id"))
-	return s.renderBotResults(c, "Bot detenido.", false)
+	slog.Info("web: bot detenido",
+		"bot", c.Params("id"),
+		"sold_qty", result.SoldQuantity,
+		"proceeds_usdt", result.ProceedsUSDT,
+		"realized_pnl_usdt", result.RealizedPnLUSDT,
+	)
+	if result.NoPosition {
+		return s.renderBotResults(c, fmt.Sprintf("Bot %q detenido con todas sus órdenes terminadas; no quedaba posición abierta por vender.", result.BotID), false)
+	}
+	message := fmt.Sprintf("Bot detenido y posición vendida: %.8f %s por %.2f USDT; coste %.2f USDT; PnL realizado %+.2f USDT.",
+		result.SoldQuantity, result.Symbol, result.ProceedsUSDT, result.CostBasisUSDT, result.RealizedPnLUSDT)
+	return s.renderBotResults(c, message, false)
 }
 
 func (s *Server) handleClosePosition(c *fiber.Ctx) error {

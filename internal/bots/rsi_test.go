@@ -64,6 +64,49 @@ func TestRSICrossUpBuy(t *testing.T) {
 	}
 }
 
+func TestRSIOneShotPerCandle(t *testing.T) {
+	// Un cruce del oversold implica UNA compra: repetir Evaluate con las
+	// mismas velas no debe ametrallar propuestas, ni en vuelo ni tras el fill.
+	r := newRSI(t, 5, 30, 70, 10)
+	data := MarketData{Symbol: "BTCUSDT", Price: 96, Candles: makeCandles(100, 100, 100, 100, 100, 100, 95, 90, 96)}
+
+	props, err := r.Evaluate(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Evaluate 1: %v", err)
+	}
+	if len(props) != 1 {
+		t.Fatalf("se esperaba 1 propuesta inicial, hay %d", len(props))
+	}
+
+	props, err = r.Evaluate(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Evaluate 2: %v", err)
+	}
+	if len(props) != 0 {
+		t.Fatalf("la señal no debe repetirse con la orden en vuelo, hay %d", len(props))
+	}
+
+	// Misma vela incluso tras cerrar la orden (fill): el cruce ya disparó.
+	r.OnOrderClosed(true)
+	props, err = r.Evaluate(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Evaluate 3: %v", err)
+	}
+	if len(props) != 0 {
+		t.Fatalf("tras el fill el mismo cruce no debe volver a comprar, hay %d", len(props))
+	}
+
+	// Vela siguiente sin nuevo cruce: nada.
+	data2 := MarketData{Symbol: "BTCUSDT", Price: 96, Candles: makeCandles(100, 100, 100, 100, 100, 100, 95, 90, 96, 96)}
+	props, err = r.Evaluate(context.Background(), data2)
+	if err != nil {
+		t.Fatalf("Evaluate 4: %v", err)
+	}
+	if len(props) != 0 {
+		t.Fatalf("una vela nueva sin cruce no debe proponer, hay %d", len(props))
+	}
+}
+
 func TestRSINoCrossNoProposal(t *testing.T) {
 	r := newRSI(t, 5, 30, 70, 10)
 	closes := []float64{100, 101, 102, 103, 104, 105, 106, 107}

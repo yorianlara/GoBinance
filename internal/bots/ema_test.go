@@ -111,3 +111,48 @@ func TestEMACandleWithBadClose(t *testing.T) {
 		t.Fatalf("se esperaba error por cierre 0, props=%d", len(props))
 	}
 }
+
+func TestEMAOneShotPerCandle(t *testing.T) {
+	// Un cruce implica UNA compra: repetir Evaluate con las mismas velas
+	// (los ticks de 5 s lo hacen) no debe ametrallar propuestas, ni mientras
+	// la orden esté en vuelo ni tras su cierre (fill).
+	e := newEMA(t, 2, 4, 10)
+	data := MarketData{Symbol: "BTCUSDT", Price: 200, Candles: makeCandles(100, 100, 100, 100, 100, 100, 200)}
+
+	props, err := e.Evaluate(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Evaluate 1: %v", err)
+	}
+	if len(props) != 1 {
+		t.Fatalf("se esperaba 1 propuesta inicial, hay %d", len(props))
+	}
+
+	// Misma vela, orden en vuelo: no repetir.
+	props, err = e.Evaluate(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Evaluate 2: %v", err)
+	}
+	if len(props) != 0 {
+		t.Fatalf("la señal no debe repetirse con la orden en vuelo, hay %d", len(props))
+	}
+
+	// Misma vela incluso tras cerrar la orden (fill): el cruce ya disparó.
+	e.OnOrderClosed(true)
+	props, err = e.Evaluate(context.Background(), data)
+	if err != nil {
+		t.Fatalf("Evaluate 3: %v", err)
+	}
+	if len(props) != 0 {
+		t.Fatalf("tras el fill el mismo cruce no debe volver a comprar, hay %d", len(props))
+	}
+
+	// Vela siguiente sin nuevo cruce: nada.
+	data2 := MarketData{Symbol: "BTCUSDT", Price: 210, Candles: makeCandles(100, 100, 100, 100, 100, 100, 200, 210)}
+	props, err = e.Evaluate(context.Background(), data2)
+	if err != nil {
+		t.Fatalf("Evaluate 4: %v", err)
+	}
+	if len(props) != 0 {
+		t.Fatalf("una vela nueva sin cruce no debe proponer, hay %d", len(props))
+	}
+}

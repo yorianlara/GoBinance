@@ -4,6 +4,8 @@ package exchange
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -154,5 +156,111 @@ func TestParseFloatSafe(t *testing.T) {
 	}
 	if got := parseFloatSafe(""); got != 0 {
 		t.Fatalf("se esperaba 0, hay %v", got)
+	}
+}
+
+func TestErrorIsAmbiguousClassification(t *testing.T) {
+	ambiguos := []error{
+		common.NewNetworkError("read: connection reset by peer"),
+		common.NewServerError("request failed after 2 retries: received status 502", 502),
+		fmt.Errorf("algo inesperado"),
+	}
+	definitivos := []error{
+		common.NewBadRequestError(`HTTP error 400: Bad Request, {"code":-1100,"msg":"Illegal characters found in parameter."}`),
+		common.NewUnauthorizedError("HTTP error"),
+		common.NewForbiddenError("HTTP error"),
+		common.NewNotFoundError("HTTP error"),
+		common.NewRateLimitBanError("HTTP error"),
+		common.NewTooManyRequestsError("HTTP error"),
+	}
+	for _, err := range ambiguos {
+		if !errorIsAmbiguous(err) {
+			t.Fatalf("se esperaba ambiguo para: %v", err)
+		}
+	}
+	for _, err := range definitivos {
+		if errorIsAmbiguous(err) {
+			t.Fatalf("se esperaba definitivo para: %v", err)
+		}
+	}
+}
+
+func TestOrderDoesNotExistDetection(t *testing.T) {
+	if orderDoesNotExist(nil) {
+		t.Fatal("nil no debía detectarse como orden inexistente")
+	}
+	binanceMiss := common.NewBadRequestError(`HTTP error 400: Bad Request, {"code":-2013,"msg":"Order does not exist."}`)
+	if !orderDoesNotExist(binanceMiss) {
+		t.Fatalf("la respuesta -2013 debía detectarse como inexistente: %v", binanceMiss)
+	}
+	otro := common.NewBadRequestError(`HTTP error 400: Bad Request, {"code":-1100,"msg":"Illegal characters found in parameter."}`)
+	if orderDoesNotExist(otro) {
+		t.Fatalf("un rechazo por parámetros no es 'orden inexistente': %v", otro)
+	}
+}
+
+func TestGetOrderByClientIDInvalidArgs(t *testing.T) {
+	c := &BinanceClient{}
+	if _, err := c.GetOrderByClientID(context.Background(), "", "id"); err == nil {
+		t.Fatal("se esperaba error por símbolo vacío")
+	}
+	if _, err := c.GetOrderByClientID(context.Background(), "BTCUSDT", ""); err == nil {
+		t.Fatal("se esperaba error por clientOrderID vacío")
+	}
+}
+
+func TestGetOrderByClientIDReturnsErrOrderNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Binance responde HTTP 400 con código -2013 para órdenes inexistentes.
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":-2013,"msg":"Order does not exist."}`))
+	}))
+	defer server.Close()
+
+	config := common.NewConfigurationRestAPI(
+		common.WithBasePath(server.URL),
+		common.WithTimeout(time.Second),
+		common.WithRetries(0),
+		common.WithApiKey("test-api-key"),
+		common.WithApiSecret("test-api-secret"),
+	)
+	client := &BinanceClient{
+		client: spot.NewBinanceSpotClient(spot.WithRestAPI(config)),
+	}
+
+	_, err := client.GetOrderByClientID(context.Background(), "BTCUSDT", "no-existo")
+	if !errors.Is(err, ErrOrderNotFound) {
+		t.Fatalf("se esperaba ErrOrderNotFound, hay %v", err)
+	}
+}
+
+func TestGetOrderByClientIDReturnsOrder(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("origClientOrderId") != "mi-orden-1" {
+			t.Errorf("se esperaba origClientOrderId=mi-orden-1, hay %q", r.URL.Query().Get("origClientOrderId"))
+		}
+		_, _ = w.Write([]byte(`{"symbol":"BTCUSDT","orderId":4242,"clientOrderId":"mi-orden-1","status":"NEW","executedQty":"0","cummulativeQuoteQty":"0","price":"0"}`))
+	}))
+	defer server.Close()
+
+	config := common.NewConfigurationRestAPI(
+		common.WithBasePath(server.URL),
+		common.WithTimeout(time.Second),
+		common.WithRetries(0),
+		common.WithApiKey("test-api-key"),
+		common.WithApiSecret("test-api-secret"),
+	)
+	client := &BinanceClient{
+		client: spot.NewBinanceSpotClient(spot.WithRestAPI(config)),
+	}
+
+	resp, err := client.GetOrderByClientID(context.Background(), "BTCUSDT", "mi-orden-1")
+	if err != nil {
+		t.Fatalf("GetOrderByClientID: %v", err)
+	}
+	if resp.OrderID != 4242 || resp.Status != "NEW" || resp.ClientOrderID != "mi-orden-1" {
+		t.Fatalf("respuesta inesperada: %+v", resp)
 	}
 }

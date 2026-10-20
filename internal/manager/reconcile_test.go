@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"math"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -24,12 +25,27 @@ type fakeExecutor struct {
 	trades    []exchange.Fill
 	tradesErr error
 
-	placed         int
-	cancelled      []cancelledOrder
-	cancelOrderErr error
-	freeBalances   map[string]float64
-	baseAssets     map[string]string
-	orderRequests  []exchange.OrderRequest
+	// orderQueue, si tiene entradas, se consume por GetOrder de forma FIFO
+	// (útil para encadenar estados: NEW antes de cancelar, CANCELED después).
+	orderQueue []exchange.OrderResponse
+
+	// placeQueue, si tiene entradas, se consume por PlaceOrder de forma FIFO
+	// (útil para distinguir la compra inicial de la venta al detener).
+	placeQueue []exchange.OrderResponse
+
+	// clientOrderByID controla GetOrderByClientID: si clientOrderErr es
+	// exchange.ErrOrderNotFound simula "no existe"; si es otro error, fallo de
+	// red; si es nil, devuelve clientOrderResp.
+	clientOrderResp exchange.OrderResponse
+	clientOrderErr  error
+
+	placed             int
+	cancelled          []cancelledOrder
+	cancelOrderErr     error
+	freeBalances       map[string]float64
+	baseAssets         map[string]string
+	orderRequests      []exchange.OrderRequest
+	clientOrderLookups []string
 }
 
 type cancelledOrder struct {
@@ -43,13 +59,31 @@ func (f *fakeExecutor) PlaceOrder(ctx context.Context, req exchange.OrderRequest
 	if f.placeErr != nil {
 		return exchange.OrderResponse{}, f.placeErr
 	}
+	if len(f.placeQueue) > 0 {
+		out := f.placeQueue[0]
+		f.placeQueue = f.placeQueue[1:]
+		return out, nil
+	}
 	return f.placeResp, nil
 }
 func (f *fakeExecutor) GetOrder(ctx context.Context, symbol string, orderID int64) (exchange.OrderResponse, error) {
+	if len(f.orderQueue) > 0 {
+		out := f.orderQueue[0]
+		f.orderQueue = f.orderQueue[1:]
+		return out, nil
+	}
 	if f.orderErr != nil {
 		return exchange.OrderResponse{}, f.orderErr
 	}
 	return f.orderResp, nil
+}
+
+func (f *fakeExecutor) GetOrderByClientID(ctx context.Context, symbol, clientOrderID string) (exchange.OrderResponse, error) {
+	f.clientOrderLookups = append(f.clientOrderLookups, clientOrderID)
+	if f.clientOrderErr != nil {
+		return exchange.OrderResponse{}, f.clientOrderErr
+	}
+	return f.clientOrderResp, nil
 }
 func (f *fakeExecutor) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
 	f.cancelled = append(f.cancelled, cancelledOrder{symbol: symbol, orderID: orderID})
@@ -77,8 +111,8 @@ func TestPauseAndStopCancelSubmittedOrders(t *testing.T) {
 		name string
 		stop func(*BotManager, string) error
 	}{
-		{name: "pause", stop: (*BotManager).Pause},
-		{name: "stop", stop: (*BotManager).StopBot},
+		{name: "pause", stop: func(m *BotManager, id string) error { return m.Pause(id) }},
+		{name: "stop", stop: func(m *BotManager, id string) error { _, err := m.StopBot(id); return err }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exec := &fakeExecutor{orderResp: exchange.OrderResponse{Status: "CANCELED"}}
@@ -128,6 +162,13 @@ func TestPauseAndStopCancelSubmittedOrders(t *testing.T) {
 			}
 			if order.State != registry.StateCancelled {
 				t.Fatalf("estado esperado %q, hay %q", registry.StateCancelled, order.State)
+			}
+			active, err := deps.Registry.ListActiveByBot("b1")
+			if err != nil {
+				t.Fatalf("ListActiveByBot: %v", err)
+			}
+			if len(active) != 0 {
+				t.Fatalf("no deben quedar órdenes activas tras %s: %+v", tc.name, active)
 			}
 		})
 	}
@@ -205,7 +246,7 @@ func TestStopKeepsOrderSubmittedUntilBinanceConfirmsCancellation(t *testing.T) {
 	if err := manager.Create(validBot("b1")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := manager.StopBot("b1"); err == nil {
+	if _, err := manager.StopBot("b1"); err == nil {
 		t.Fatal("se esperaba error porque Binance aún reporta la orden abierta")
 	}
 	order, ok := deps.Registry.Get(clientOrderID)
@@ -217,12 +258,21 @@ func TestStopKeepsOrderSubmittedUntilBinanceConfirmsCancellation(t *testing.T) {
 	}
 }
 
-func TestStopRecordsPartialFillBeforeMarkingOrderTerminal(t *testing.T) {
+func TestStopRecordsPartialFillAndLiquidatesPosition(t *testing.T) {
+	// Al detener, un fill parcial (o total, si la orden llenó antes del
+	// cancel en Binance) se registra y el inventario creado se vende: el bot
+	// no queda con posición abierta ni órdenes atascadas.
 	exec := &fakeExecutor{
 		orderResp: exchange.OrderResponse{
 			Status: "CANCELED", ExecutedQty: 0.004, CummulativeQuoteQty: 0.4,
 		},
 		trades: []exchange.Fill{{Quantity: 0.004, Price: 100}},
+		// Venta automática del inventario al detener: market sell que llena.
+		placeQueue: []exchange.OrderResponse{
+			{OrderID: 888, Status: "FILLED", ExecutedQty: 0.004, CummulativeQuoteQty: 0.42},
+		},
+		freeBalances: map[string]float64{"BTC": 0.004},
+		baseAssets:   map[string]string{"BTCUSDT": "BTC"},
 	}
 	deps := newDepsWithExecutor(t, exec)
 	clientOrderID, err := deps.Registry.Reserve(domain.OrderProposal{
@@ -244,7 +294,8 @@ func TestStopRecordsPartialFillBeforeMarkingOrderTerminal(t *testing.T) {
 	if err := manager.Create(validBot("b1")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := manager.StopBot("b1"); err != nil {
+	result, err := manager.StopBot("b1")
+	if err != nil {
 		t.Fatalf("StopBot: %v", err)
 	}
 	order, ok := deps.Registry.Get(clientOrderID)
@@ -254,9 +305,34 @@ func TestStopRecordsPartialFillBeforeMarkingOrderTerminal(t *testing.T) {
 	if order.State != registry.StateFilled || order.FilledQty != 0.004 || order.FilledValue != 0.4 {
 		t.Fatalf("la ejecución parcial debe conservarse en el registro: %+v", order)
 	}
+	if result.SoldQuantity != 0.004 || result.ProceedsUSDT != 0.42 || result.CostBasisUSDT != 0.4 {
+		t.Fatalf("la posición parcial debía venderse al detener: %+v", result)
+	}
+
+	// La VENTA quedó registrada y el riesgo queda sin exposición.
+	orders, err := deps.Registry.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sells := 0
+	for _, o := range orders {
+		if o.Proposal.Side != domain.OrderSideSell {
+			continue
+		}
+		sells++
+		if o.State != registry.StateFilled || o.Proposal.PositionCostBasisUSDT != 0.4 || o.Proposal.PositionsClosed != 1 {
+			t.Fatalf("venta no persistida correctamente: %+v", o)
+		}
+	}
+	if sells != 1 {
+		t.Fatalf("se esperaba 1 orden de venta registrada, hay %d", sells)
+	}
 	state := deps.RiskState.State()
-	if state.OpenPositions != 1 || state.ExposureTotalUSDT != 0.4 {
-		t.Fatalf("riesgo no refleja la ejecución parcial: %+v", state)
+	if state.OpenPositions != 0 || state.ExposureTotalUSDT != 0 {
+		t.Fatalf("exposición/posiciones sin cerrar tras el stop: %+v", state)
+	}
+	if math.Abs(state.TotalPnL-0.02) > 1e-9 || math.Abs(state.DailyPnL-0.02) > 1e-9 {
+		t.Fatalf("PnL realizado incorrecto: %+v", state)
 	}
 }
 
@@ -817,6 +893,535 @@ func TestNotifyOrderClosedOnPlaceError(t *testing.T) {
 
 	if g.Closed() != 1 {
 		t.Fatalf("se esperaba 1 OnOrderClosed tras error, hay %d", g.Closed())
+	}
+}
+
+// --- reconciliación de órdenes expiradas/orfanas ---
+
+func staleSubmittedOrder(t *testing.T, deps Deps) registry.TrackedOrder {
+	t.Helper()
+	p := domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	}
+	id, err := deps.Registry.Reserve(p)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := deps.Registry.MarkSubmitted(id, 4321); err != nil {
+		t.Fatalf("MarkSubmitted: %v", err)
+	}
+	o, ok := deps.Registry.Get(id)
+	if !ok {
+		t.Fatal("orden no encontrada")
+	}
+	// Simular antigüedad: el registro no permite mutar CreatedAt desde fuera.
+	o.CreatedAt = time.Now().Add(-2 * time.Hour)
+	return o
+}
+
+func TestReconcileTimeoutCancelsOrderOnExchangeBeforeReleasing(t *testing.T) {
+	// La orden sigue viva en el exchange (NEW) al llegar el timeout: debe
+	// cancelarse y confirmarse su cancelación; nunca liberar a ciegas.
+	exec := &fakeExecutor{
+		orderQueue: []exchange.OrderResponse{
+			{OrderID: 4321, Status: "NEW"},      // consulta previa a la cancelación
+			{OrderID: 4321, Status: "CANCELED"}, // estado final tras cancelar
+		},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	o := staleSubmittedOrder(t, deps)
+	rt := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+
+	ord, ready := rt.cancelExpiredSubmittedOrder(context.Background(), o)
+	if !ready {
+		t.Fatal("se esperaba estado terminal tras cancelar")
+	}
+	// El estado terminal se procesa como cualquier reconciliación normal.
+	rt.processOrderStatus(context.Background(), "b1", o, ord)
+
+	got, ok := deps.Registry.Get(o.ClientOrderID)
+	if !ok {
+		t.Fatal("orden no encontrada")
+	}
+	if got.State != registry.StateCancelled {
+		t.Fatalf("se esperaba cancelled en el registro, hay %q", got.State)
+	}
+	if len(exec.cancelled) != 1 || exec.cancelled[0].orderID != 4321 {
+		t.Fatalf("se esperaba 1 cancelación en el exchange, hay %+v", exec.cancelled)
+	}
+}
+
+func TestReconcileTimeoutRecordsFillWhenOrderFilledBeforeTimeout(t *testing.T) {
+	// La orden se rellenó justo antes del timeout: cancelar fallaría, y el
+	// estado FILLED debe registrarse como ejecución (no marcarse failed).
+	exec := &fakeExecutor{
+		orderQueue: []exchange.OrderResponse{
+			{OrderID: 4321, Status: "FILLED", ExecutedQty: 0.01, CummulativeQuoteQty: 1},
+		},
+		trades: []exchange.Fill{{OrderID: 4321, Symbol: "BTCUSDT", Quantity: 0.01, Price: 100}},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	o := staleSubmittedOrder(t, deps)
+	rt := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+
+	ord, ready := rt.cancelExpiredSubmittedOrder(context.Background(), o)
+	if !ready {
+		t.Fatal("FILLED es terminal: debía estar listo para procesar")
+	}
+	rt.processOrderStatus(context.Background(), "b1", o, ord)
+
+	got, _ := deps.Registry.Get(o.ClientOrderID)
+	if got.State != registry.StateFilled || got.FilledQty != 0.01 || got.FilledValue != 1.0 {
+		t.Fatalf("el rellenado debe contabilizarse aunque expire el timeout: %+v", got)
+	}
+	state := deps.RiskState.State()
+	if state.ExposureTotalUSDT != 1.0 || state.OpenPositions != 1 {
+		t.Fatalf("riesgo no refleja el relleno: %+v", state)
+	}
+}
+
+func TestReconcileTimeoutKeepsOrderWhenCancellationCannotBeConfirmed(t *testing.T) {
+	// La cancelación se envía pero GetOrder sigue reportando NEW: la orden
+	// puede ejecutarse más tarde, así que la reserva debe conservarse.
+	exec := &fakeExecutor{
+		orderQueue: []exchange.OrderResponse{
+			{OrderID: 4321, Status: "NEW"},
+			{OrderID: 4321, Status: "NEW"},
+		},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	o := staleSubmittedOrder(t, deps)
+	rt := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+
+	_, ready := rt.cancelExpiredSubmittedOrder(context.Background(), o)
+	if ready {
+		t.Fatal("no se debía liberar una orden cuyo estado final no es confirmable")
+	}
+	got, _ := deps.Registry.Get(o.ClientOrderID)
+	if got.State != registry.StateSubmitted {
+		t.Fatalf("la reserva debía conservarse, hay %q", got.State)
+	}
+	if len(exec.cancelled) != 1 {
+		t.Fatalf("se esperaba un intento de cancelación, hay %d", len(exec.cancelled))
+	}
+}
+
+func TestResolveUncertainOutcomeReleasesReservationWhenOrderDoesNotExist(t *testing.T) {
+	exec := &fakeExecutor{clientOrderErr: exchange.ErrOrderNotFound}
+	deps := newDepsWithExecutor(t, exec)
+	id, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	rt := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+
+	rt.resolveUncertainOutcome(context.Background(), registry.TrackedOrder{
+		ClientOrderID: id,
+		Proposal:      domain.OrderProposal{BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy, Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now()},
+		State:         registry.StateReserved,
+	})
+
+	got, _ := deps.Registry.Get(id)
+	if got.State != registry.StateFailed {
+		t.Fatalf("la reserva debía liberarse como failed, hay %q", got.State)
+	}
+	if len(exec.clientOrderLookups) != 1 || exec.clientOrderLookups[0] != id {
+		t.Fatalf("se esperaba una consulta por clientOrderID, hay %+v", exec.clientOrderLookups)
+	}
+}
+
+func TestResolveUncertainOutcomeClaimsExistingFilledOrder(t *testing.T) {
+	// El envío perdió su respuesta, pero la orden existe y ya está FILLED: la
+	// reserva debe reclamarse y el fill contabilizarse en exposición/riesgo.
+	exec := &fakeExecutor{
+		clientOrderResp: exchange.OrderResponse{OrderID: 777, Status: "FILLED", ExecutedQty: 0.01, CummulativeQuoteQty: 1},
+		trades:          []exchange.Fill{{OrderID: 777, Symbol: "BTCUSDT", Quantity: 0.01, Price: 100}},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	id, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	rt := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+
+	rt.resolveUncertainOutcome(context.Background(), registry.TrackedOrder{
+		ClientOrderID: id,
+		Proposal:      domain.OrderProposal{BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy, Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now()},
+		State:         registry.StateReserved,
+	})
+
+	got, _ := deps.Registry.Get(id)
+	if got.State != registry.StateFilled || got.ExchangeID != 777 || got.FilledQty != 0.01 {
+		t.Fatalf("la orden existente debía reclamarse y quedar filled: %+v", got)
+	}
+	state := deps.RiskState.State()
+	if state.ExposureTotalUSDT != 1.0 || state.OpenPositions != 1 {
+		t.Fatalf("el fill de la orden reclamada debe contabilizarse: %+v", state)
+	}
+}
+
+func TestResolveUncertainOutcomeKeepsReservationWhenLookupFails(t *testing.T) {
+	// La consulta también falla (red caída): conservar la reserva es lo único
+	// seguro; nunca liberar sin confirmación del exchange.
+	exec := &fakeExecutor{clientOrderErr: errors.New("network unreachable")}
+	deps := newDepsWithExecutor(t, exec)
+	id, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	rt := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+
+	rt.resolveUncertainOutcome(context.Background(), registry.TrackedOrder{
+		ClientOrderID: id,
+		Proposal:      domain.OrderProposal{BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy, Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now()},
+		State:         registry.StateReserved,
+	})
+
+	got, _ := deps.Registry.Get(id)
+	if got.State != registry.StateReserved {
+		t.Fatalf("la reserva debía conservarse, hay %q", got.State)
+	}
+}
+
+// --- reconciliación de reservas huérfanas en cada tick ---
+
+func TestReconcileResolvesReservedOrdersRegardlessOfMaxAge(t *testing.T) {
+	// Con max_order_age_minutes desactivado (0) la reserva huérfana cabe en
+	// limbo para siempre si solo se revisara al expirar: debe resolverse en
+	// cada tick igualmente.
+	exec := &fakeExecutor{clientOrderErr: exchange.ErrOrderNotFound}
+	deps := newDepsWithExecutor(t, exec)
+	deps.ConfigStore.UpdateRisk(withMaxOrderAge(t, deps.ConfigStore.Risk(), 0))
+	id, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	rt := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+
+	rt.reconcile(context.Background(), validBot("b1"))
+
+	got, ok := deps.Registry.Get(id)
+	if !ok {
+		t.Fatal("orden no encontrada")
+	}
+	if got.State != registry.StateFailed {
+		t.Fatalf("con timeout desactivado la reserva debía resolverse igualmente; hay %q", got.State)
+	}
+}
+
+func TestReconcileClaimsReservedOrderWithoutMaxAge(t *testing.T) {
+	// La reserva existe en el exchange y ya está FILLED: debe reclamarse y
+	// contabilizarse cada tick, aunque el timeout esté desactivado.
+	exec := &fakeExecutor{
+		clientOrderResp: exchange.OrderResponse{OrderID: 777, Status: "FILLED", ExecutedQty: 0.01, CummulativeQuoteQty: 1},
+		trades:          []exchange.Fill{{OrderID: 777, Symbol: "BTCUSDT", Quantity: 0.01, Price: 100}},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	deps.ConfigStore.UpdateRisk(withMaxOrderAge(t, deps.ConfigStore.Risk(), 0))
+	id, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	rt := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+
+	rt.reconcile(context.Background(), validBot("b1"))
+
+	got, _ := deps.Registry.Get(id)
+	if got.State != registry.StateFilled || got.ExchangeID != 777 {
+		t.Fatalf("la orden existente debía reclamarse sin esperar el timeout: %+v", got)
+	}
+	state := deps.RiskState.State()
+	if state.ExposureTotalUSDT != 1.0 || state.OpenPositions != 1 {
+		t.Fatalf("el fill reclamado debe contabilizarse: %+v", state)
+	}
+}
+
+// --- pausa/stop con reservas huérfanas ---
+
+func TestStopSettlesReservedOrderByClaimingThenCancelling(t *testing.T) {
+	// Al detener, una reserva huérfana cuya orden sí existe en el exchange
+	// debe reclamarse y luego cancelarse como cualquier submitted.
+	exec := &fakeExecutor{
+		clientOrderResp: exchange.OrderResponse{OrderID: 555, Status: "NEW"},
+		orderResp:       exchange.OrderResponse{OrderID: 555, Status: "CANCELED"},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	id, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	m, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(m.Shutdown)
+	if err := m.Create(validBot("b1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.StopBot("b1"); err != nil {
+		t.Fatalf("StopBot: %v", err)
+	}
+
+	got, _ := deps.Registry.Get(id)
+	if got.State != registry.StateCancelled || got.ExchangeID != 555 {
+		t.Fatalf("la orden existente debía reclamarse y cancelarse: %+v", got)
+	}
+	if len(exec.cancelled) != 1 || exec.cancelled[0].orderID != 555 {
+		t.Fatalf("se esperaba 1 cancelación en el exchange, hay %+v", exec.cancelled)
+	}
+}
+
+func TestStopRecordsFillFromClaimedReservationAndLiquidates(t *testing.T) {
+	// La orden reservada existe y ya está FILLED: el fill debe contabilizarse
+	// al detener el bot y su inventario debe liquidarse; sin cancelaciones.
+	exec := &fakeExecutor{
+		clientOrderResp: exchange.OrderResponse{OrderID: 556, Status: "FILLED", ExecutedQty: 0.01, CummulativeQuoteQty: 1},
+		trades:          []exchange.Fill{{OrderID: 556, Symbol: "BTCUSDT", Quantity: 0.01, Price: 100}},
+		placeQueue: []exchange.OrderResponse{
+			{OrderID: 889, Status: "FILLED", ExecutedQty: 0.01, CummulativeQuoteQty: 1.1},
+		},
+		freeBalances: map[string]float64{"BTC": 0.01},
+		baseAssets:   map[string]string{"BTCUSDT": "BTC"},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	id, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	m, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(m.Shutdown)
+	if err := m.Create(validBot("b1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	result, err := m.StopBot("b1")
+	if err != nil {
+		t.Fatalf("StopBot: %v", err)
+	}
+
+	got, _ := deps.Registry.Get(id)
+	if got.State != registry.StateFilled || got.FilledQty != 0.01 || got.FilledValue != 1.0 {
+		t.Fatalf("el fill de la orden reclamada debe conservarse: %+v", got)
+	}
+	if len(exec.cancelled) != 0 {
+		t.Fatalf("no debían enviarse cancelaciones, hay %+v", exec.cancelled)
+	}
+	if result.SoldQuantity != 0.01 || result.ProceedsUSDT != 1.1 || result.CostBasisUSDT != 1.0 {
+		t.Fatalf("la posición reclamada debía liquidarse al detener: %+v", result)
+	}
+	state := deps.RiskState.State()
+	if state.ExposureTotalUSDT != 0 || state.OpenPositions != 0 {
+		t.Fatalf("la posición liquidada debe desaparecer del riesgo: %+v", state)
+	}
+	if math.Abs(state.TotalPnL-0.1) > 1e-9 {
+		t.Fatalf("PnL realizado incorrecto: %+v", state)
+	}
+}
+
+func TestStopKeepsUnconfirmableReservation(t *testing.T) {
+	// La reserva no puede confirmarse (red caída): conservarla y avisa; nunca
+	// liberarla a ciegas ni cancelar de más.
+	exec := &fakeExecutor{clientOrderErr: errors.New("network unreachable")}
+	deps := newDepsWithExecutor(t, exec)
+	id, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	m, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(m.Shutdown)
+	if err := m.Create(validBot("b1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.StopBot("b1"); err == nil {
+		t.Fatal("se esperaba que Stop informara la reserva no confirmable")
+	}
+
+	got, _ := deps.Registry.Get(id)
+	if got.State != registry.StateReserved {
+		t.Fatalf("la reserva no confirmable debía conservarse; hay %q", got.State)
+	}
+	if len(exec.cancelled) != 0 {
+		t.Fatalf("sin orden en el exchange no debían enviarse cancelaciones: %+v", exec.cancelled)
+	}
+}
+
+// --- tick ante envíos de resultado incierto ---
+
+func TestTickUncertainSubmissionKeepsReservationWhenLookupFails(t *testing.T) {
+	exec := &fakeExecutor{
+		placeErr:       exchange.ErrOrderSubmissionUncertain,
+		clientOrderErr: errors.New("network unreachable"),
+	}
+	p := domain.OrderProposal{Symbol: "BTCUSDT", Side: domain.OrderSideBuy, Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now()}
+	strat := &fakeStrategy{props: []domain.OrderProposal{p}}
+	deps := makeDeps(t, fixedFactory(strat), &risk.FakeCapitalProvider{Value: 1000}, &fakeMarket{price: 100})
+	deps.Executor = exec
+
+	rt := NewBotRuntime(validBot("b1"), strat, deps)
+	rt.tick(context.Background())
+
+	orders, _ := deps.Registry.List()
+	if len(orders) != 1 || orders[0].State != registry.StateReserved {
+		// Marcar failed sin confirmar duplicaría la compra si la orden existe
+		// en el exchange: la reserva debe permanecer hasta poder confirmar.
+		t.Fatalf("la reserva debe conservarse ante un envío incierto no confirmable: %+v", orders)
+	}
+	if len(exec.clientOrderLookups) != 1 {
+		t.Fatalf("se esperaba una consulta al exchange por clientOrderID, hay %d", len(exec.clientOrderLookups))
+	}
+}
+
+func TestTickUncertainSubmissionMarksFailedWhenExchangeConfirmsAbsence(t *testing.T) {
+	exec := &fakeExecutor{
+		placeErr:       exchange.ErrOrderSubmissionUncertain,
+		clientOrderErr: exchange.ErrOrderNotFound,
+	}
+	p := domain.OrderProposal{Symbol: "BTCUSDT", Side: domain.OrderSideBuy, Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now()}
+	strat := &fakeStrategy{props: []domain.OrderProposal{p}}
+	deps := makeDeps(t, fixedFactory(strat), &risk.FakeCapitalProvider{Value: 1000}, &fakeMarket{price: 100})
+	deps.Executor = exec
+
+	rt := NewBotRuntime(validBot("b1"), strat, deps)
+	rt.tick(context.Background())
+
+	orders, _ := deps.Registry.List()
+	if len(orders) != 1 || orders[0].State != registry.StateFailed {
+		t.Fatalf("el exchange confirmó que no existe: debía marcarse failed, hay %+v", orders)
+	}
+}
+
+func TestTickUncertainSubmissionClaimsExistingOrder(t *testing.T) {
+	// El envío se perdió pero la orden existe y ya está FILLED: reclamarse y
+	// contabilizarse, sin duplicar la compra en el próximo tick.
+	exec := &fakeExecutor{
+		placeErr:        exchange.ErrOrderSubmissionUncertain,
+		clientOrderResp: exchange.OrderResponse{OrderID: 777, Status: "FILLED", ExecutedQty: 0.01, CummulativeQuoteQty: 1},
+		trades:          []exchange.Fill{{OrderID: 777, Symbol: "BTCUSDT", Quantity: 0.01, Price: 100}},
+	}
+	p := domain.OrderProposal{Symbol: "BTCUSDT", Side: domain.OrderSideBuy, Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now()}
+	strat := &fakeStrategy{props: []domain.OrderProposal{p}}
+	deps := makeDeps(t, fixedFactory(strat), &risk.FakeCapitalProvider{Value: 1000}, &fakeMarket{price: 100})
+	deps.Executor = exec
+
+	rt := NewBotRuntime(validBot("b1"), strat, deps)
+	rt.tick(context.Background())
+
+	orders, _ := deps.Registry.List()
+	if len(orders) != 1 || orders[0].State != registry.StateFilled || orders[0].ExchangeID != 777 {
+		t.Fatalf("la orden existente debía reclamarse como filled: %+v", orders)
+	}
+}
+
+func TestTickResponseWithoutOrderIDSettlesViaLookup(t *testing.T) {
+	// El exchange responde 200 pero sin ID útil: el resultado es ambiguo.
+	exec := &fakeExecutor{
+		placeResp:       exchange.OrderResponse{OrderID: 0, Status: "NEW"},
+		clientOrderResp: exchange.OrderResponse{OrderID: 888, Status: "NEW"},
+	}
+	p := domain.OrderProposal{Symbol: "BTCUSDT", Side: domain.OrderSideBuy, Type: domain.OrderTypeMarket, Quantity: 0.01, ProposedAt: time.Now()}
+	strat := &fakeStrategy{props: []domain.OrderProposal{p}}
+	deps := makeDeps(t, fixedFactory(strat), &risk.FakeCapitalProvider{Value: 1000}, &fakeMarket{price: 100})
+	deps.Executor = exec
+
+	rt := NewBotRuntime(validBot("b1"), strat, deps)
+	rt.tick(context.Background())
+
+	orders, _ := deps.Registry.List()
+	if len(orders) != 1 || orders[0].State != registry.StateSubmitted || orders[0].ExchangeID != 888 {
+		t.Fatalf("la orden debía reclamarse por clientOrderID: %+v", orders)
+	}
+}
+
+// --- persistencia incremental ---
+
+func TestPersistBotsHookFiresOnLifecycleChanges(t *testing.T) {
+	var mu sync.Mutex
+	var events []string
+	deps := makeDeps(t, fixedFactory(bots.NoopStrategy{}), &risk.FakeCapitalProvider{Value: 1000}, &fakeMarket{price: 100})
+	deps.PersistBots = func() error {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, "save")
+		return nil
+	}
+
+	m, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(m.Shutdown)
+
+	if err := m.Create(validBot("b1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := m.Enable("b1"); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if err := m.Pause("b1"); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	if _, err := m.StopBot("b1"); err != nil {
+		t.Fatalf("StopBot: %v", err)
+	}
+	if err := m.Delete("b1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) < 5 {
+		t.Fatalf("cada cambio de catálogo/estado debe guardar bots.json; guardados: %d", len(events))
+	}
+}
+
+func TestPersistBotsHookErrorDoesNotBreakMutations(t *testing.T) {
+	deps := makeDeps(t, fixedFactory(bots.NoopStrategy{}), &risk.FakeCapitalProvider{Value: 1000}, &fakeMarket{price: 100})
+	deps.PersistBots = func() error { return errors.New("disco lleno") }
+
+	m, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(m.Shutdown)
+
+	if err := m.Create(validBot("b1")); err != nil {
+		t.Fatalf("un fallo de persistencia no debe bloquear Create: %v", err)
+	}
+	if err := m.Enable("b1"); err != nil {
+		t.Fatalf("un fallo de persistencia no debe bloquear Enable: %v", err)
+	}
+	if st, _ := m.Status("b1"); st != domain.BotStatusRunning {
+		t.Fatalf("estado inesperado: %q", st)
 	}
 }
 

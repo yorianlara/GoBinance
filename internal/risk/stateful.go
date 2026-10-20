@@ -3,6 +3,7 @@ package risk
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -151,6 +152,56 @@ func (sm *StatefulManager) OnPositionsClosed(symbol string, valueUSDT, pnl float
 	if sm.state.OpenPositions < 0 {
 		sm.state.OpenPositions = 0
 	}
+}
+
+// ReconcileExposure restablece la exposición por símbolo, la exposición total
+// y el número de posiciones abiertas a partir de la contabilidad autoritativa
+// de órdenes (inventario por bot/símbolo reconstruido del registro). Esto
+// elimina posiciones huérfanas acumuladas cuando se perdió parte del registro
+// (sesiones con registro en memoria, ventas hechas fuera del bot, reinicios de
+// la base de datos). El resto del estado (PnL diario/total, capital pico y
+// reset diario) se conserva intacto. Devuelve el estado anterior y si hubo
+// cambios, para registrar el ajuste; es idempotente.
+func (sm *StatefulManager) ReconcileExposure(exposureBySymbol map[string]float64, openPositions int) (State, bool) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	before := sm.state.clone()
+
+	cleaned := make(map[string]float64, len(exposureBySymbol))
+	total := 0.0
+	for symbol, value := range exposureBySymbol {
+		if value < 0 {
+			value = 0
+		}
+		cleaned[symbol] = value
+		total += value
+	}
+
+	if sameExposure(before.ExposureBySymbol, before.ExposureTotalUSDT, cleaned, total) &&
+		before.OpenPositions == openPositions {
+		return before, false
+	}
+
+	sm.state.ExposureBySymbol = cleaned
+	sm.state.ExposureTotalUSDT = total
+	sm.state.OpenPositions = openPositions
+	return before, true
+}
+
+// sameExposure compara exposición acumulada con tolerancia numérica.
+func sameExposure(a map[string]float64, aTotal float64, b map[string]float64, bTotal float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	const epsilon = 1e-9
+	for symbol, value := range a {
+		other, ok := b[symbol]
+		if !ok || math.Abs(value-other) > epsilon {
+			return false
+		}
+	}
+	_ = aTotal
+	return math.Abs(aTotal-bTotal) <= epsilon
 }
 
 // Persist guarda el State actual en disco.
