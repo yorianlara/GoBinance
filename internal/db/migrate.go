@@ -32,6 +32,20 @@ CREATE INDEX IF NOT EXISTS idx_orders_bot ON orders(bot_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_active_proposal
     ON orders(bot_id, symbol, side, type, quantity, limit_price)
     WHERE state IN ('reserved', 'submitted');
+
+CREATE TABLE IF NOT EXISTS system_logs (
+    id          UUID PRIMARY KEY,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    level       TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT '',
+    attributes  JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_logs_occurred_at
+    ON system_logs(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_system_logs_level_occurred_at
+    ON system_logs(level, occurred_at DESC);
 `
 
 // Migrate crea el esquema si no existe. Idempotente.

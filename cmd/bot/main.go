@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"runtime"
@@ -16,6 +17,7 @@ import (
 	"mi-bot/internal/domain"
 	"mi-bot/internal/exchange"
 	"mi-bot/internal/manager"
+	"mi-bot/internal/observability"
 	"mi-bot/internal/persistence"
 	"mi-bot/internal/registry"
 	"mi-bot/internal/risk"
@@ -67,57 +69,74 @@ func main() {
 	cfgVal := cfgStore.Get()
 	cfg := &cfgVal
 
+	dbURL := os.Getenv(cfg.Database.URLEnv)
+	if dbURL == "" {
+		logger.Fatalf("%s no definida; PostgreSQL es obligatorio para persistir órdenes, sesiones y logs.", cfg.Database.URLEnv)
+	}
+	ctxDB, cancelDB := context.WithTimeout(context.Background(), 15*time.Second)
+	db, err := dbpkg.Open(ctxDB, dbURL)
+	cancelDB()
+	if err != nil {
+		logger.Fatalf("Error al conectar con PostgreSQL: %v", err)
+	}
+	defer db.Close()
+
+	ctxMig, cancelMig := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := dbpkg.Migrate(ctxMig, db); err != nil {
+		cancelMig()
+		logger.Fatalf("Error al migrar esquema: %v", err)
+	}
+	cancelMig()
+
+	logHandler, err := observability.NewPostgresHandler(db)
+	if err != nil {
+		logger.Fatalf("Error al configurar logs PostgreSQL: %v", err)
+	}
+	consoleHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo, AddSource: true})
+	slog.SetDefault(slog.New(observability.NewMultiHandler(consoleHandler, logHandler)).With("service", "mi-bot"))
+	logger.SetOutput(slog.NewLogLogger(slog.Default().Handler(), slog.LevelInfo).Writer())
+	log.SetOutput(logger.Writer())
+	slog.Info("persistencia PostgreSQL y logging estructurado activados")
+	slog.Info("application startup", "goos", runtime.GOOS, "goarch", runtime.GOARCH)
+	fatalf := func(format string, args ...any) {
+		logger.Printf(format, args...)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := logHandler.Close(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "No se pudo vaciar la cola de logs PostgreSQL: %v\n", err)
+		}
+		cancel()
+		os.Exit(1)
+	}
+
 	binanceClient, err := exchange.NewBinanceClient(cfg)
 	if err != nil {
-		logger.Fatalf("Error al inicializar Binance: %v", err)
+		fatalf("Error al inicializar Binance: %v", err)
 	}
 
 	ctxStartup, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
 	if err := binanceClient.Ping(ctxStartup); err != nil {
 		cancelStartup()
-		logger.Fatalf("Error de conectividad con Binance: %v", err)
+		fatalf("Error de conectividad con Binance: %v", err)
 	}
 	logger.Println("Conexión con Binance Spot Testnet verificada.")
 	cancelStartup()
 
-	// --- Registro de órdenes: PostgreSQL si DATABASE_URL existe, memoria si no.
-	var reg registry.OrderRegistry
-	dbURL := os.Getenv(cfg.Database.URLEnv)
-	if dbURL != "" {
-		ctxDB, cancelDB := context.WithTimeout(context.Background(), 15*time.Second)
-		db, err := dbpkg.Open(ctxDB, dbURL)
-		cancelDB()
-		if err != nil {
-			logger.Fatalf("Error al conectar con PostgreSQL: %v", err)
-		}
-		defer db.Close()
-
-		ctxMig, cancelMig := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := dbpkg.Migrate(ctxMig, db); err != nil {
-			cancelMig()
-			logger.Fatalf("Error al migrar esquema: %v", err)
-		}
-		cancelMig()
-
-		pg, err := registry.NewPostgres(db)
-		if err != nil {
-			logger.Fatalf("Error al crear PostgresRegistry: %v", err)
-		}
-		reg = pg
-		logger.Println("Registro de órdenes: PostgreSQL")
-	} else {
-		reg = registry.NewMemory()
-		logger.Printf("Aviso: %s no definida; registro en memoria (se pierde al reiniciar).", cfg.Database.URLEnv)
+	// PostgreSQL es obligatorio para el registro durable de órdenes, sesiones y logs.
+	pg, err := registry.NewPostgres(db)
+	if err != nil {
+		fatalf("Error al crear PostgresRegistry: %v", err)
 	}
+	var reg registry.OrderRegistry = pg
+	logger.Println("Registro de órdenes: PostgreSQL")
 
 	// 1. Cargar bots ANTES de crear el CapitalProvider, para derivar símbolos.
 	store, err := persistence.New("bots.json")
 	if err != nil {
-		logger.Fatalf("Error al abrir bots.json: %v", err)
+		fatalf("Error al abrir bots.json: %v", err)
 	}
 	storedBots, err := store.Load()
 	if err != nil {
-		logger.Fatalf("Error al cargar bots.json: %v", err)
+		fatalf("Error al cargar bots.json: %v", err)
 	}
 
 	// 2. Derivar símbolos únicos de los bots + lista por defecto.
@@ -138,16 +157,16 @@ func main() {
 
 	capitalProvider, err := risk.NewBinanceCapitalProvider(binanceClient, symbols)
 	if err != nil {
-		logger.Fatalf("Error al crear proveedor de capital: %v", err)
+		fatalf("Error al crear proveedor de capital: %v", err)
 	}
 
 	stateStore, err := risk.NewStateStore("risk-state.json")
 	if err != nil {
-		logger.Fatalf("Error al abrir risk-state.json: %v", err)
+		fatalf("Error al abrir risk-state.json: %v", err)
 	}
 	riskState, err := risk.NewStatefulManager(risk.New(), stateStore)
 	if err != nil {
-		logger.Fatalf("Error al crear StatefulManager: %v", err)
+		fatalf("Error al crear StatefulManager: %v", err)
 	}
 
 	market := binanceMarket{client: binanceClient}
@@ -166,7 +185,7 @@ func main() {
 
 	botMgr, err := manager.New(deps)
 	if err != nil {
-		logger.Fatalf("Error al crear BotManager: %v", err)
+		fatalf("Error al crear BotManager: %v", err)
 	}
 
 	toEnable := make([]string, 0)
@@ -198,7 +217,7 @@ func main() {
 		Config:   cfgStore,
 	})
 	if err != nil {
-		logger.Fatalf("Error al crear servidor web: %v", err)
+		fatalf("Error al crear servidor web: %v", err)
 	}
 	go func() {
 		addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -240,4 +259,9 @@ func main() {
 	}
 
 	logger.Println("Apagado completado.")
+	ctxLogClose, cancelLogClose := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := logHandler.Close(ctxLogClose); err != nil {
+		fmt.Fprintf(os.Stderr, "No se pudo vaciar la cola de logs PostgreSQL: %v\n", err)
+	}
+	cancelLogClose()
 }

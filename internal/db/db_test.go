@@ -54,6 +54,28 @@ func TestOpenAndMigrate(t *testing.T) {
 	if !exists {
 		t.Fatal("la tabla orders no existe")
 	}
+
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_name = 'system_logs'
+		)
+	`).Scan(&exists); err != nil {
+		t.Fatalf("query system_logs: %v", err)
+	}
+	if !exists {
+		t.Fatal("la tabla system_logs no existe")
+	}
+	var idType string
+	if err := db.QueryRowContext(ctx, `
+		SELECT data_type FROM information_schema.columns
+		WHERE table_name = 'system_logs' AND column_name = 'id'
+	`).Scan(&idType); err != nil {
+		t.Fatalf("query system_logs.id: %v", err)
+	}
+	if idType != "uuid" {
+		t.Fatalf("system_logs.id debe ser UUID, es %q", idType)
+	}
 }
 
 func TestMigrateIdempotent(t *testing.T) {

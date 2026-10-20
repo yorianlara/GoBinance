@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -48,6 +49,7 @@ func requireAuth(cfg authConfig, store *session.Store) fiber.Handler {
 		}
 		sess, err := store.Get(c)
 		if err != nil {
+			slog.Error("auth: leer sesión", "err", err)
 			return c.Redirect("/login")
 		}
 		if sess.Get("user") == nil {
@@ -64,7 +66,9 @@ func (s *Server) handleLoginPage(c *fiber.Ctx) error {
 	}
 	// Si ya está logueado, redirigir al dashboard.
 	sess, err := s.sessionStore.Get(c)
-	if err == nil && sess.Get("user") != nil {
+	if err != nil {
+		slog.Warn("auth: leer sesión de login", "err", err)
+	} else if sess.Get("user") != nil {
 		return c.Redirect("/")
 	}
 	return s.renderLogin(c, "")
@@ -79,26 +83,33 @@ func (s *Server) handleLoginSubmit(c *fiber.Ctx) error {
 	pass := c.FormValue("password")
 
 	if user != s.auth.User || pass != s.auth.Password {
+		slog.Warn("auth: login rechazado", "username", user)
 		return s.renderLogin(c, "Usuario o contraseña incorrectos")
 	}
 
 	sess, err := s.sessionStore.Get(c)
 	if err != nil {
+		slog.Error("auth: obtener sesión", "err", err)
 		return s.renderLogin(c, fmt.Sprintf("Error de sesión: %v", err))
 	}
 	sess.Set("user", user)
 	if err := sess.Save(); err != nil {
+		slog.Error("auth: guardar sesión", "err", err)
 		return s.renderLogin(c, fmt.Sprintf("Error al guardar sesión: %v", err))
 	}
+	slog.Info("auth: login correcto", "username", user)
 	return c.Redirect("/")
 }
 
 // handleLogout destruye la sesión y redirige al login.
 func (s *Server) handleLogout(c *fiber.Ctx) error {
 	sess, err := s.sessionStore.Get(c)
-	if err == nil {
-		_ = sess.Destroy()
+	if err != nil {
+		slog.Error("auth: obtener sesión para logout", "err", err)
+	} else if err := sess.Destroy(); err != nil {
+		slog.Error("auth: destruir sesión", "err", err)
 	}
+	slog.Info("auth: logout")
 	return c.Redirect("/login")
 }
 

@@ -16,7 +16,6 @@ import (
 	"mi-bot/internal/risk"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/session"
 )
 
@@ -67,10 +66,28 @@ func New(deps Deps) (*Server, error) {
 	}
 
 	app := fiber.New(fiber.Config{AppName: "mi-bot", DisableStartupMessage: true})
-	app.Use(logger.New(logger.Config{
-		Format:     "[web] ${time} ${status} ${method} ${path} (${latency})\n",
-		TimeFormat: "15:04:05",
-	}))
+	app.Use(func(c *fiber.Ctx) error {
+		started := time.Now()
+		err := c.Next()
+		status := c.Response().StatusCode()
+		args := []any{
+			"method", c.Method(),
+			"path", c.Path(),
+			"status", status,
+			"latency", time.Since(started),
+		}
+		if err != nil {
+			args = append(args, "err", err)
+		}
+		if err != nil || status >= fiber.StatusInternalServerError {
+			slog.Error("web: request failed", args...)
+		} else if status >= fiber.StatusBadRequest {
+			slog.Warn("web: request rejected", args...)
+		} else {
+			slog.Info("web: request", args...)
+		}
+		return err
+	})
 
 	s := &Server{
 		app:          app,
@@ -262,10 +279,12 @@ func (s *Server) handleCreateBot(c *fiber.Ctx) error {
 
 	alloc, err := strconv.ParseFloat(allocStr, 64)
 	if err != nil || alloc <= 0 || alloc > 100 {
+		slog.Warn("web: crear bot rechazado", "id", id, "reason", "asignación inválida")
 		return s.renderBotFeedback(c, "La asignación debe ser un número entre 0 y 100.", true)
 	}
 	amount, err := strconv.ParseFloat(amountStr, 64)
 	if err != nil || amount <= 0 {
+		slog.Warn("web: crear bot rechazado", "id", id, "reason", "importe por compra inválido")
 		return s.renderBotFeedback(c, "El importe por compra debe ser mayor que cero.", true)
 	}
 
@@ -301,6 +320,10 @@ func (s *Server) handleCreateBot(c *fiber.Ctx) error {
 		slog.Warn("web: crear bot", "id", id, "err", err)
 		return s.renderBotFeedback(c, err.Error(), true)
 	}
+	slog.Info("web: bot creado",
+		"bot", bot.ID, "strategy", bot.Strategy.Type,
+		"symbol", bot.Symbol, "allocation_percent", bot.AllocationPercent,
+	)
 	c.Set("HX-Trigger", "botsChanged")
 	return s.renderBotFeedback(c, "Bot creado correctamente.", false)
 }
@@ -310,6 +333,7 @@ func (s *Server) handleEnable(c *fiber.Ctx) error {
 		slog.Warn("web: enable", "err", err)
 		return s.renderBotResults(c, err.Error(), true)
 	}
+	slog.Info("web: bot encendido", "bot", c.Params("id"))
 	return s.renderBotResults(c, "Bot encendido.", false)
 }
 func (s *Server) handlePause(c *fiber.Ctx) error {
@@ -317,6 +341,7 @@ func (s *Server) handlePause(c *fiber.Ctx) error {
 		slog.Warn("web: pause", "err", err)
 		return s.renderBotResults(c, err.Error(), true)
 	}
+	slog.Info("web: bot pausado", "bot", c.Params("id"))
 	return s.renderBotResults(c, "Bot pausado.", false)
 }
 func (s *Server) handleStop(c *fiber.Ctx) error {
@@ -324,6 +349,7 @@ func (s *Server) handleStop(c *fiber.Ctx) error {
 		slog.Warn("web: stop", "err", err)
 		return s.renderBotResults(c, err.Error(), true)
 	}
+	slog.Info("web: bot detenido", "bot", c.Params("id"))
 	return s.renderBotResults(c, "Bot detenido.", false)
 }
 func (s *Server) handleDelete(c *fiber.Ctx) error {
@@ -331,6 +357,7 @@ func (s *Server) handleDelete(c *fiber.Ctx) error {
 		slog.Warn("web: delete", "err", err)
 		return s.renderBotResults(c, err.Error(), true)
 	}
+	slog.Info("web: bot eliminado", "bot", c.Params("id"))
 	return s.renderBotResults(c, "Bot eliminado.", false)
 }
 
@@ -406,11 +433,14 @@ func (s *Server) handleUpdateRisk(c *fiber.Ctx) error {
 	if err := s.deps.Config.UpdateRisk(r); err != nil {
 		return s.renderConfigForm(c, r, false, err.Error())
 	}
-	slog.Info("web: configuración de riesgo actualizada")
+	slog.Info("web: configuración de riesgo actualizada", "risk", r)
 	return s.renderConfigForm(c, r, true, "")
 }
 
 func (s *Server) renderConfigForm(c *fiber.Ctx, r config.RiskConfig, success bool, errMsg string) error {
+	if errMsg != "" {
+		slog.Warn("web: actualización de riesgo rechazada", "reason", errMsg)
+	}
 	data := configFormData{Risk: r, Success: success, Error: errMsg}
 	c.Set("Content-Type", "text/html; charset=utf-8")
 	return s.pages.ExecuteTemplate(c, "config-form", data)
