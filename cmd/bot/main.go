@@ -50,8 +50,17 @@ func (b binanceExecutor) PlaceOrder(ctx context.Context, req exchange.OrderReque
 func (b binanceExecutor) GetOrder(ctx context.Context, symbol string, orderID int64) (exchange.OrderResponse, error) {
 	return b.client.GetOrder(ctx, symbol, orderID)
 }
+func (b binanceExecutor) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	return b.client.CancelOrder(ctx, symbol, orderID)
+}
 func (b binanceExecutor) GetTrades(ctx context.Context, symbol string, orderID int64) ([]exchange.Fill, error) {
 	return b.client.GetTrades(ctx, symbol, orderID)
+}
+func (b binanceExecutor) GetFreeBalance(ctx context.Context, asset string) (float64, error) {
+	return b.client.GetFreeBalance(ctx, asset)
+}
+func (b binanceExecutor) GetSymbolBaseAsset(ctx context.Context, symbol string) (string, error) {
+	return b.client.GetSymbolBaseAsset(ctx, symbol)
 }
 
 func main() {
@@ -210,11 +219,14 @@ func main() {
 
 	// Servidor web en goroutine.
 	webServer, err := web.New(web.Deps{
-		Bots:     botMgr,
-		Risk:     riskState,
-		Registry: reg,
-		Capital:  capitalProvider,
-		Config:   cfgStore,
+		Bots:               botMgr,
+		Risk:               riskState,
+		Registry:           reg,
+		Capital:            capitalProvider,
+		Config:             cfgStore,
+		OrderCanceller:     binanceClient,
+		PositionCloser:     botMgr,
+		AllPositionsCloser: botMgr,
 	})
 	if err != nil {
 		fatalf("Error al crear servidor web: %v", err)

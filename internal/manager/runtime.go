@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -10,16 +11,20 @@ import (
 	"mi-bot/internal/bots"
 	"mi-bot/internal/domain"
 	"mi-bot/internal/exchange"
+	"mi-bot/internal/registry"
 )
 
 const (
-	TickInterval         = 5 * time.Second
-	DefaultKlineInterval = "1m"
-	DefaultKlineLimit    = 100
+	TickInterval             = 5 * time.Second
+	DefaultKlineInterval     = "1m"
+	DefaultKlineLimit        = 100
+	orderCancellationTimeout = 10 * time.Second
 )
 
 type BotRuntime struct {
+	actionMu sync.Mutex
 	mu       sync.RWMutex
+	tickMu   sync.Mutex
 	bot      domain.Bot
 	strategy bots.Strategy
 	cancel   context.CancelFunc
@@ -59,6 +64,9 @@ func (r *BotRuntime) setStatus(s domain.BotStatus) {
 }
 
 func (r *BotRuntime) Start(parent context.Context) error {
+	r.actionMu.Lock()
+	defer r.actionMu.Unlock()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.bot.Status == domain.BotStatusRunning {
@@ -89,6 +97,9 @@ func (r *BotRuntime) run(ctx context.Context, ticker *time.Ticker, done chan str
 }
 
 func (r *BotRuntime) tick(ctx context.Context) {
+	r.tickMu.Lock()
+	defer r.tickMu.Unlock()
+
 	if ctx.Err() != nil {
 		return
 	}
@@ -212,6 +223,16 @@ func (r *BotRuntime) Pause() error { return r.stopAndSet(domain.BotStatusPaused)
 func (r *BotRuntime) Stop() error  { return r.stopAndSet(domain.BotStatusStopped) }
 
 func (r *BotRuntime) stopAndSet(next domain.BotStatus) error {
+	r.actionMu.Lock()
+	defer r.actionMu.Unlock()
+	return r.stopAndSetLocked(next)
+}
+
+func (r *BotRuntime) stopAndSetLocked(next domain.BotStatus) error {
+	r.tickMu.Lock()
+	botID := r.Bot().ID
+	cancelErr := r.cancelSubmittedOrders(botID)
+
 	r.mu.Lock()
 	cancel := r.cancel
 	ticker := r.ticker
@@ -219,6 +240,8 @@ func (r *BotRuntime) stopAndSet(next domain.BotStatus) error {
 	r.cancel = nil
 	r.ticker = nil
 	r.done = nil
+	r.bot.Status = next
+	r.bot.UpdatedAt = time.Now()
 	r.mu.Unlock()
 
 	if cancel != nil {
@@ -227,11 +250,87 @@ func (r *BotRuntime) stopAndSet(next domain.BotStatus) error {
 	if ticker != nil {
 		ticker.Stop()
 	}
+	r.tickMu.Unlock()
+
 	if done != nil {
 		<-done
 	}
-	r.setStatus(next)
-	return nil
+	return cancelErr
+}
+
+func (r *BotRuntime) cancelSubmittedOrders(botID string) error {
+	orders, err := r.deps.Registry.ListActiveByBot(botID)
+	if err != nil {
+		return fmt.Errorf("listar órdenes activas del bot %q: %w", botID, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), orderCancellationTimeout)
+	defer cancel()
+
+	var cancelErrs []error
+	for _, order := range orders {
+		if order.State != registry.StateSubmitted {
+			continue
+		}
+		if r.deps.Executor == nil {
+			cancelErrs = append(cancelErrs, fmt.Errorf("cancelar orden %q: executor no configurado", order.ClientOrderID))
+			continue
+		}
+
+		err := r.deps.Executor.CancelOrder(ctx, order.Proposal.Symbol, order.ExchangeID)
+		if err != nil {
+			slog.Warn("bot: cancelar orden", "bot", botID, "client_order_id", order.ClientOrderID, "err", err)
+			cancelErrs = append(cancelErrs, fmt.Errorf("cancelar orden %q en el exchange: %w", order.ClientOrderID, err))
+			continue
+		}
+		finalOrder, err := r.deps.Executor.GetOrder(ctx, order.Proposal.Symbol, order.ExchangeID)
+		if err != nil {
+			slog.Warn("bot: verificar cancelación", "bot", botID, "client_order_id", order.ClientOrderID, "err", err)
+			cancelErrs = append(cancelErrs, fmt.Errorf("verificar cancelación de orden %q: %w", order.ClientOrderID, err))
+			continue
+		}
+		switch finalOrder.Status {
+		case "CANCELED", "EXPIRED", "REJECTED":
+		default:
+			cancelErrs = append(cancelErrs, fmt.Errorf(
+				"Binance no confirmó la cancelación de la orden %q; estado final %q",
+				order.ClientOrderID, finalOrder.Status,
+			))
+			continue
+		}
+		if finalOrder.ExecutedQty > positionEpsilon {
+			fills, err := r.deps.Executor.GetTrades(ctx, order.Proposal.Symbol, order.ExchangeID)
+			if err != nil {
+				cancelErrs = append(cancelErrs, fmt.Errorf(
+					"consultar ejecuciones de orden parcialmente ejecutada %q: %w",
+					order.ClientOrderID, err,
+				))
+				continue
+			}
+			quantity, value := 0.0, 0.0
+			for _, fill := range fills {
+				quantity += fill.Quantity
+				value += fill.Quantity * fill.Price
+			}
+			if err := r.recordExecution(ctx, botID, order, quantity, value); err != nil {
+				cancelErrs = append(cancelErrs, fmt.Errorf(
+					"registrar ejecución parcial de orden %q: %w", order.ClientOrderID, err,
+				))
+				continue
+			}
+			slog.Info("bot: orden parcialmente ejecutada al detener",
+				"bot", botID, "client_order_id", order.ClientOrderID,
+				"executed_qty", quantity, "value_usdt", value)
+			continue
+		}
+		if err := r.deps.Registry.MarkCancelled(order.ClientOrderID); err != nil {
+			slog.Error("bot: marcar orden cancelada", "bot", botID, "client_order_id", order.ClientOrderID, "err", err)
+			cancelErrs = append(cancelErrs, fmt.Errorf("marcar orden %q como cancelada: %w", order.ClientOrderID, err))
+			continue
+		}
+		slog.Info("bot: orden cancelada al detener", "bot", botID, "client_order_id", order.ClientOrderID, "exchange_order_id", order.ExchangeID)
+	}
+	return errors.Join(cancelErrs...)
 }
 
 func (r *BotRuntime) WaitDone() error {

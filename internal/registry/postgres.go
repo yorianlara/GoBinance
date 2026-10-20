@@ -38,12 +38,13 @@ func (r *PostgresRegistry) Reserve(p domain.OrderProposal) (string, error) {
 			client_order_id, bot_id, symbol, side, type,
 			quantity, limit_price, reason, proposed_at,
 			state, exchange_id, filled_qty, filled_value,
+			position_cost_basis_usdt, positions_closed,
 			created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,0,0,$11,$11)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,0,0,$11,$12,$13,$13)
 	`,
 		id, p.BotID, p.Symbol, string(p.Side), string(p.Type),
 		p.Quantity, p.LimitPrice, p.Reason, p.ProposedAt,
-		string(StateReserved), now,
+		string(StateReserved), p.PositionCostBasisUSDT, p.PositionsClosed, now,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -91,6 +92,25 @@ func (r *PostgresRegistry) MarkFilled(clientOrderID string, filledQty, filledVal
 	return nil
 }
 
+func (r *PostgresRegistry) SetPositionCloseDetails(clientOrderID string, costBasisUSDT float64, positionsClosed int) error {
+	if costBasisUSDT < 0 || positionsClosed < 0 {
+		return fmt.Errorf("costBasisUSDT y positionsClosed no pueden ser negativos")
+	}
+	res, err := r.db.Exec(`
+		UPDATE orders
+		SET position_cost_basis_usdt = $1, positions_closed = $2, updated_at = $3
+		WHERE client_order_id = $4 AND state = $5 AND side = $6
+	`, costBasisUSDT, positionsClosed, time.Now().UTC(), clientOrderID, string(StateSubmitted), string(domain.OrderSideSell))
+	if err != nil {
+		return fmt.Errorf("actualizar datos del cierre de posición: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("no existe orden de cierre %q o no está submitted", clientOrderID)
+	}
+	return nil
+}
+
 func (r *PostgresRegistry) MarkCancelled(clientOrderID string) error {
 	return r.markTerminal(clientOrderID, StateCancelled)
 }
@@ -120,6 +140,7 @@ func (r *PostgresRegistry) Get(clientOrderID string) (TrackedOrder, bool) {
 		SELECT client_order_id, bot_id, symbol, side, type,
 		       quantity, limit_price, reason, proposed_at,
 		       state, exchange_id, filled_qty, filled_value,
+		       position_cost_basis_usdt, positions_closed,
 		       created_at, updated_at
 		FROM orders WHERE client_order_id = $1
 	`, clientOrderID)
@@ -131,6 +152,7 @@ func (r *PostgresRegistry) Get(clientOrderID string) (TrackedOrder, bool) {
 		&o.Proposal.Quantity, &o.Proposal.LimitPrice, &o.Proposal.Reason,
 		&o.Proposal.ProposedAt,
 		(*string)(&o.State), &o.ExchangeID, &o.FilledQty, &o.FilledValue,
+		&o.Proposal.PositionCostBasisUSDT, &o.Proposal.PositionsClosed,
 		&o.CreatedAt, &o.UpdatedAt,
 	)
 	if err != nil {
@@ -150,6 +172,7 @@ func (r *PostgresRegistry) List() ([]TrackedOrder, error) {
 		SELECT client_order_id, bot_id, symbol, side, type,
 		       quantity, limit_price, reason, proposed_at,
 		       state, exchange_id, filled_qty, filled_value,
+		       position_cost_basis_usdt, positions_closed,
 		       created_at, updated_at
 		FROM orders ORDER BY created_at ASC
 	`)
@@ -163,6 +186,7 @@ func (r *PostgresRegistry) ListActiveByBot(botID string) ([]TrackedOrder, error)
 		SELECT client_order_id, bot_id, symbol, side, type,
 		       quantity, limit_price, reason, proposed_at,
 		       state, exchange_id, filled_qty, filled_value,
+		       position_cost_basis_usdt, positions_closed,
 		       created_at, updated_at
 		FROM orders
 		WHERE bot_id = $1 AND state IN ($2, $3)
@@ -178,6 +202,7 @@ func (r *PostgresRegistry) Recent(limit int) ([]TrackedOrder, error) {
 		SELECT client_order_id, bot_id, symbol, side, type,
 		       quantity, limit_price, reason, proposed_at,
 		       state, exchange_id, filled_qty, filled_value,
+		       position_cost_basis_usdt, positions_closed,
 		       created_at, updated_at
 		FROM orders ORDER BY created_at DESC LIMIT $1
 	`, limit)
@@ -199,6 +224,7 @@ func (r *PostgresRegistry) queryOrders(query string, args ...any) ([]TrackedOrde
 			&o.Proposal.Quantity, &o.Proposal.LimitPrice, &o.Proposal.Reason,
 			&o.Proposal.ProposedAt,
 			(*string)(&o.State), &o.ExchangeID, &o.FilledQty, &o.FilledValue,
+			&o.Proposal.PositionCostBasisUSDT, &o.Proposal.PositionsClosed,
 			&o.CreatedAt, &o.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan orden: %w", err)

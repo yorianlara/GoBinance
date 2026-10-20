@@ -36,6 +36,7 @@ type OrderRegistry interface {
 	Reserve(p domain.OrderProposal) (string, error)
 	MarkSubmitted(clientOrderID string, exchangeOrderID int64) error
 	MarkFilled(clientOrderID string, filledQty, filledValue float64) error
+	SetPositionCloseDetails(clientOrderID string, costBasisUSDT float64, positionsClosed int) error
 	MarkCancelled(clientOrderID string) error
 	MarkFailed(clientOrderID string) error
 	Get(clientOrderID string) (TrackedOrder, bool)

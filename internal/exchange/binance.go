@@ -100,3 +100,47 @@ func (b *BinanceClient) GetSpotBalances(ctx context.Context) (map[string]float64
 
 	return balances, nil
 }
+
+func (b *BinanceClient) GetFreeBalance(ctx context.Context, asset string) (float64, error) {
+	if b == nil || b.client == nil || b.client.RestApi == nil {
+		return 0, fmt.Errorf("el cliente de Binance no está inicializado")
+	}
+	if asset == "" {
+		return 0, fmt.Errorf("el asset es obligatorio")
+	}
+	resp, err := b.client.RestApi.AccountAPI.GetAccount(ctx).Execute()
+	if err != nil {
+		return 0, fmt.Errorf("obtener balance libre de %s: %w", asset, err)
+	}
+	if resp == nil {
+		return 0, fmt.Errorf("respuesta de cuenta vacía")
+	}
+	for _, balance := range resp.Data.Balances {
+		if balance.GetAsset() != asset {
+			continue
+		}
+		free, err := strconv.ParseFloat(balance.GetFree(), 64)
+		if err != nil {
+			return 0, fmt.Errorf("balance libre inválido para %s: %w", asset, err)
+		}
+		return free, nil
+	}
+	return 0, nil
+}
+
+func (b *BinanceClient) GetSymbolBaseAsset(ctx context.Context, symbol string) (string, error) {
+	if b == nil || b.client == nil || b.client.RestApi == nil {
+		return "", fmt.Errorf("el cliente de Binance no está inicializado")
+	}
+	if symbol == "" {
+		return "", fmt.Errorf("el símbolo es obligatorio")
+	}
+	filters, err := b.filtersFor(ctx, symbol)
+	if err != nil {
+		return "", fmt.Errorf("obtener asset base de %s: %w", symbol, err)
+	}
+	if filters.BaseAsset == "" {
+		return "", fmt.Errorf("Binance no devolvió el asset base de %s", symbol)
+	}
+	return filters.BaseAsset, nil
+}

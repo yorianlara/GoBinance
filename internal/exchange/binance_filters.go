@@ -16,6 +16,7 @@ type SymbolFilters struct {
 	MarketStepSize float64 // MARKET_LOT_SIZE (para market)
 	MinQty         float64
 	MinNotional    float64
+	BaseAsset      string
 }
 
 // stepFor devuelve el stepSize adecuado según el tipo de orden.
@@ -43,6 +44,7 @@ func (b *BinanceClient) filtersFor(ctx context.Context, symbol string) (SymbolFi
 	}
 
 	var f SymbolFilters
+	f.BaseAsset = resp.Data.Symbols[0].GetBaseAsset()
 	for _, filter := range resp.Data.Symbols[0].Filters {
 		switch v := filter.GetActualInstance().(type) {
 		case *models.LotSizeFilter:

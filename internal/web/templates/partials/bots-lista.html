@@ -28,6 +28,12 @@
             <button hx-post="/bots/{{.ID}}/enable" hx-target="#bots-container" hx-swap="innerHTML">Encender</button>
             <button class="danger" hx-delete="/bots/{{.ID}}" hx-target="#bots-container" hx-swap="innerHTML" hx-confirm="¿Eliminar el bot {{.ID}}?">Eliminar</button>
           {{end}}
+          <button class="danger"
+                  hx-post="/bots/{{.ID}}/close-position"
+                  hx-target="#bots-container"
+                  hx-swap="innerHTML"
+                  hx-disabled-elt="this"
+                  hx-confirm="Se detendrá el bot, se cancelarán sus órdenes pendientes y se venderá a mercado solo la posición de {{.ID}} registrada por mi-bot. ¿Continuar?">Cerrar posición</button>
         </td>
       </tr>
       {{end}}

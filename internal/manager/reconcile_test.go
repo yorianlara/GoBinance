@@ -15,7 +15,7 @@ import (
 	"mi-bot/internal/risk"
 )
 
-// fakeExecutor permite controlar respuestas de PlaceOrder/GetOrder/GetTrades.
+// fakeExecutor permite controlar respuestas de PlaceOrder/GetOrder/CancelOrder/GetTrades.
 type fakeExecutor struct {
 	placeResp exchange.OrderResponse
 	placeErr  error
@@ -24,11 +24,22 @@ type fakeExecutor struct {
 	trades    []exchange.Fill
 	tradesErr error
 
-	placed int
+	placed         int
+	cancelled      []cancelledOrder
+	cancelOrderErr error
+	freeBalances   map[string]float64
+	baseAssets     map[string]string
+	orderRequests  []exchange.OrderRequest
+}
+
+type cancelledOrder struct {
+	symbol  string
+	orderID int64
 }
 
 func (f *fakeExecutor) PlaceOrder(ctx context.Context, req exchange.OrderRequest) (exchange.OrderResponse, error) {
 	f.placed++
+	f.orderRequests = append(f.orderRequests, req)
 	if f.placeErr != nil {
 		return exchange.OrderResponse{}, f.placeErr
 	}
@@ -40,11 +51,436 @@ func (f *fakeExecutor) GetOrder(ctx context.Context, symbol string, orderID int6
 	}
 	return f.orderResp, nil
 }
+func (f *fakeExecutor) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	f.cancelled = append(f.cancelled, cancelledOrder{symbol: symbol, orderID: orderID})
+	return f.cancelOrderErr
+}
 func (f *fakeExecutor) GetTrades(ctx context.Context, symbol string, orderID int64) ([]exchange.Fill, error) {
 	if f.tradesErr != nil {
 		return nil, f.tradesErr
 	}
 	return f.trades, nil
+}
+func (f *fakeExecutor) GetFreeBalance(ctx context.Context, asset string) (float64, error) {
+	return f.freeBalances[asset], nil
+}
+func (f *fakeExecutor) GetSymbolBaseAsset(ctx context.Context, symbol string) (string, error) {
+	asset, ok := f.baseAssets[symbol]
+	if !ok {
+		return "", errors.New("asset base desconocido")
+	}
+	return asset, nil
+}
+
+func TestPauseAndStopCancelSubmittedOrders(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(*BotManager, string) error
+	}{
+		{name: "pause", stop: (*BotManager).Pause},
+		{name: "stop", stop: (*BotManager).StopBot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &fakeExecutor{orderResp: exchange.OrderResponse{Status: "CANCELED"}}
+			deps := newDepsWithExecutor(t, exec)
+			proposal := domain.OrderProposal{
+				BotID:      "b1",
+				Symbol:     "BTCUSDT",
+				Side:       domain.OrderSideBuy,
+				Type:       domain.OrderTypeLimit,
+				Quantity:   0.01,
+				LimitPrice: 100,
+				ProposedAt: time.Now(),
+			}
+			clientOrderID, err := deps.Registry.Reserve(proposal)
+			if err != nil {
+				t.Fatalf("Reserve: %v", err)
+			}
+			const exchangeOrderID = 4321
+			if err := deps.Registry.MarkSubmitted(clientOrderID, exchangeOrderID); err != nil {
+				t.Fatalf("MarkSubmitted: %v", err)
+			}
+
+			manager, err := New(deps)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(manager.Shutdown)
+			if err := manager.Create(validBot("b1")); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := manager.Enable("b1"); err != nil {
+				t.Fatalf("Enable: %v", err)
+			}
+			if err := tc.stop(manager, "b1"); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+
+			if len(exec.cancelled) != 1 {
+				t.Fatalf("se esperaba 1 llamada CancelOrder, hay %d", len(exec.cancelled))
+			}
+			if got := exec.cancelled[0]; got.symbol != "BTCUSDT" || got.orderID != exchangeOrderID {
+				t.Fatalf("CancelOrder recibió %+v", got)
+			}
+			order, ok := deps.Registry.Get(clientOrderID)
+			if !ok {
+				t.Fatal("orden no encontrada")
+			}
+			if order.State != registry.StateCancelled {
+				t.Fatalf("estado esperado %q, hay %q", registry.StateCancelled, order.State)
+			}
+		})
+	}
+}
+
+func TestPauseKeepsSubmittedOrderWhenExchangeCancellationFails(t *testing.T) {
+	exec := &fakeExecutor{
+		cancelOrderErr: errors.New("exchange unavailable"),
+		orderResp:      exchange.OrderResponse{Status: "NEW"},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	proposal := domain.OrderProposal{
+		BotID:      "b1",
+		Symbol:     "BTCUSDT",
+		Side:       domain.OrderSideBuy,
+		Type:       domain.OrderTypeLimit,
+		Quantity:   0.01,
+		LimitPrice: 100,
+		ProposedAt: time.Now(),
+	}
+	clientOrderID, err := deps.Registry.Reserve(proposal)
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := deps.Registry.MarkSubmitted(clientOrderID, 4321); err != nil {
+		t.Fatalf("MarkSubmitted: %v", err)
+	}
+
+	manager, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(manager.Shutdown)
+	if err := manager.Create(validBot("b1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := manager.Enable("b1"); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if err := manager.Pause("b1"); err == nil {
+		t.Fatal("se esperaba que Pause informara el error de cancelación")
+	}
+
+	order, ok := deps.Registry.Get(clientOrderID)
+	if !ok {
+		t.Fatal("orden no encontrada")
+	}
+	if order.State != registry.StateSubmitted {
+		t.Fatalf("la orden debe seguir submitted, hay %q", order.State)
+	}
+	if len(exec.cancelled) != 1 {
+		t.Fatalf("se esperaba 1 llamada CancelOrder, hay %d", len(exec.cancelled))
+	}
+}
+
+func TestStopKeepsOrderSubmittedUntilBinanceConfirmsCancellation(t *testing.T) {
+	exec := &fakeExecutor{orderResp: exchange.OrderResponse{Status: "NEW"}}
+	deps := newDepsWithExecutor(t, exec)
+	clientOrderID, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeLimit, Quantity: 0.01, LimitPrice: 100,
+		ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := deps.Registry.MarkSubmitted(clientOrderID, 4321); err != nil {
+		t.Fatalf("MarkSubmitted: %v", err)
+	}
+	manager, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(manager.Shutdown)
+	if err := manager.Create(validBot("b1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := manager.StopBot("b1"); err == nil {
+		t.Fatal("se esperaba error porque Binance aún reporta la orden abierta")
+	}
+	order, ok := deps.Registry.Get(clientOrderID)
+	if !ok {
+		t.Fatal("orden no encontrada")
+	}
+	if order.State != registry.StateSubmitted {
+		t.Fatalf("la orden debe permanecer submitted hasta confirmar cancelación; estado %q", order.State)
+	}
+}
+
+func TestStopRecordsPartialFillBeforeMarkingOrderTerminal(t *testing.T) {
+	exec := &fakeExecutor{
+		orderResp: exchange.OrderResponse{
+			Status: "CANCELED", ExecutedQty: 0.004, CummulativeQuoteQty: 0.4,
+		},
+		trades: []exchange.Fill{{Quantity: 0.004, Price: 100}},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	clientOrderID, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeLimit, Quantity: 0.01, LimitPrice: 100,
+		ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve: %v", err)
+	}
+	if err := deps.Registry.MarkSubmitted(clientOrderID, 4321); err != nil {
+		t.Fatalf("MarkSubmitted: %v", err)
+	}
+	manager, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(manager.Shutdown)
+	if err := manager.Create(validBot("b1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := manager.StopBot("b1"); err != nil {
+		t.Fatalf("StopBot: %v", err)
+	}
+	order, ok := deps.Registry.Get(clientOrderID)
+	if !ok {
+		t.Fatal("orden no encontrada")
+	}
+	if order.State != registry.StateFilled || order.FilledQty != 0.004 || order.FilledValue != 0.4 {
+		t.Fatalf("la ejecución parcial debe conservarse en el registro: %+v", order)
+	}
+	state := deps.RiskState.State()
+	if state.OpenPositions != 1 || state.ExposureTotalUSDT != 0.4 {
+		t.Fatalf("riesgo no refleja la ejecución parcial: %+v", state)
+	}
+}
+
+func TestClosePositionSellsBotInventoryAndRealizesPnL(t *testing.T) {
+	exec := &fakeExecutor{
+		placeResp: exchange.OrderResponse{
+			OrderID: 777, Status: "FILLED", ExecutedQty: 0.5, CummulativeQuoteQty: 60,
+		},
+		freeBalances: map[string]float64{"BTC": 0.5},
+		baseAssets:   map[string]string{"BTCUSDT": "BTC"},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	buyID, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.5, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve buy: %v", err)
+	}
+	if err := deps.Registry.MarkSubmitted(buyID, 123); err != nil {
+		t.Fatalf("MarkSubmitted buy: %v", err)
+	}
+	if err := deps.Registry.MarkFilled(buyID, 0.5, 50); err != nil {
+		t.Fatalf("MarkFilled buy: %v", err)
+	}
+	deps.RiskState.OnOrderFilled("BTCUSDT", 50)
+
+	manager, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(manager.Shutdown)
+	if err := manager.Create(validBot("b1")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	result, err := manager.ClosePosition(context.Background(), "b1")
+	if err != nil {
+		t.Fatalf("ClosePosition: %v", err)
+	}
+	if result.SoldQuantity != 0.5 || result.ProceedsUSDT != 60 ||
+		result.CostBasisUSDT != 50 || result.RealizedPnLUSDT != 10 {
+		t.Fatalf("resultado de liquidación inesperado: %+v", result)
+	}
+	if len(exec.orderRequests) != 1 ||
+		exec.orderRequests[0].Side != domain.OrderSideSell ||
+		exec.orderRequests[0].Quantity != 0.5 {
+		t.Fatalf("orden de venta inesperada: %+v", exec.orderRequests)
+	}
+	if status, _ := manager.Status("b1"); status != domain.BotStatusStopped {
+		t.Fatalf("el bot debe quedar detenido, está %q", status)
+	}
+	state := deps.RiskState.State()
+	if state.ExposureTotalUSDT != 0 || state.OpenPositions != 0 {
+		t.Fatalf("exposición/posiciones sin cerrar: %+v", state)
+	}
+	if state.TotalPnL != 10 || state.DailyPnL != 10 {
+		t.Fatalf("PnL realizado incorrecto: %+v", state)
+	}
+	orders, err := deps.Registry.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	foundSell := false
+	for _, order := range orders {
+		if order.Proposal.Side == domain.OrderSideSell {
+			foundSell = true
+			if order.State != registry.StateFilled ||
+				order.Proposal.PositionCostBasisUSDT != 50 ||
+				order.Proposal.PositionsClosed != 1 {
+				t.Fatalf("cierre no persistido correctamente: %+v", order)
+			}
+		}
+	}
+	if !foundSell {
+		t.Fatal("no se registró la orden de venta")
+	}
+}
+
+func TestClosePositionRefusesInsufficientFreeBalance(t *testing.T) {
+	exec := &fakeExecutor{
+		freeBalances: map[string]float64{"BTC": 0.2},
+		baseAssets:   map[string]string{"BTCUSDT": "BTC"},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	buyID, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.5, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve buy: %v", err)
+	}
+	_ = deps.Registry.MarkSubmitted(buyID, 123)
+	_ = deps.Registry.MarkFilled(buyID, 0.5, 50)
+
+	runtime := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+	if _, err := runtime.ClosePosition(context.Background()); err == nil {
+		t.Fatal("se esperaba que el cierre rechazara un saldo libre insuficiente")
+	}
+	if exec.placed != 0 {
+		t.Fatalf("no debía enviarse una venta, se enviaron %d", exec.placed)
+	}
+}
+
+func TestClosePositionKeepsReservationWhenSubmissionResultIsUncertain(t *testing.T) {
+	exec := &fakeExecutor{
+		placeErr:     exchange.ErrOrderSubmissionUncertain,
+		freeBalances: map[string]float64{"BTC": 0.5},
+		baseAssets:   map[string]string{"BTCUSDT": "BTC"},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	buyID, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 0.5, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve buy: %v", err)
+	}
+	if err := deps.Registry.MarkSubmitted(buyID, 123); err != nil {
+		t.Fatalf("MarkSubmitted buy: %v", err)
+	}
+	if err := deps.Registry.MarkFilled(buyID, 0.5, 50); err != nil {
+		t.Fatalf("MarkFilled buy: %v", err)
+	}
+
+	runtime := NewBotRuntime(validBot("b1"), bots.NoopStrategy{}, deps)
+	if _, err := runtime.ClosePosition(context.Background()); err == nil {
+		t.Fatal("se esperaba informar el resultado incierto")
+	}
+	orders, err := deps.Registry.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	var closeOrder *registry.TrackedOrder
+	for i := range orders {
+		if orders[i].Proposal.Side == domain.OrderSideSell {
+			closeOrder = &orders[i]
+			break
+		}
+	}
+	if closeOrder == nil || closeOrder.State != registry.StateReserved {
+		t.Fatalf("la reserva debe permanecer activa ante un resultado incierto: %+v", closeOrder)
+	}
+}
+
+func TestPositionInventoryUsesFIFOAndCountsFullyClosedLots(t *testing.T) {
+	now := time.Now()
+	inventory, err := inventoryFor([]registry.TrackedOrder{
+		{Proposal: domain.OrderProposal{BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy}, State: registry.StateFilled, FilledQty: 1, FilledValue: 100, CreatedAt: now},
+		{Proposal: domain.OrderProposal{BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy}, State: registry.StateFilled, FilledQty: 1, FilledValue: 120, CreatedAt: now.Add(time.Second)},
+	}, "b1", "BTCUSDT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cost, closed, err := inventory.sell(1.5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost != 160 || closed != 1 || inventory.quantity() != 0.5 || inventory.costBasis() != 60 {
+		t.Fatalf("posición tras venta inesperada: cost=%v closed=%d inventory=%+v", cost, closed, inventory)
+	}
+}
+
+func TestCloseAllPositionsIncludesHistoricalSymbols(t *testing.T) {
+	exec := &fakeExecutor{
+		baseAssets: map[string]string{
+			"BTCUSDT": "BTC",
+			"ETHUSDT": "ETH",
+		},
+	}
+	deps := newDepsWithExecutor(t, exec)
+	buyID, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideBuy,
+		Type: domain.OrderTypeMarket, Quantity: 1, ProposedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Reserve buy: %v", err)
+	}
+	if err := deps.Registry.MarkSubmitted(buyID, 101); err != nil {
+		t.Fatalf("MarkSubmitted buy: %v", err)
+	}
+	if err := deps.Registry.MarkFilled(buyID, 1, 100); err != nil {
+		t.Fatalf("MarkFilled buy: %v", err)
+	}
+	sellID, err := deps.Registry.Reserve(domain.OrderProposal{
+		BotID: "b1", Symbol: "BTCUSDT", Side: domain.OrderSideSell,
+		Type: domain.OrderTypeMarket, Quantity: 1, ProposedAt: time.Now().Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Reserve sell: %v", err)
+	}
+	if err := deps.Registry.MarkSubmitted(sellID, 102); err != nil {
+		t.Fatalf("MarkSubmitted sell: %v", err)
+	}
+	if err := deps.Registry.MarkFilled(sellID, 1, 110); err != nil {
+		t.Fatalf("MarkFilled sell: %v", err)
+	}
+
+	botManager, err := New(deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(botManager.Shutdown)
+	bot := validBot("b1")
+	bot.Symbol = "ETHUSDT"
+	if err := botManager.Create(bot); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	attempts, err := botManager.CloseAllPositions(context.Background())
+	if err != nil {
+		t.Fatalf("CloseAllPositions: %v", err)
+	}
+	if len(attempts) != 2 ||
+		attempts[0].Symbol != "BTCUSDT" || attempts[1].Symbol != "ETHUSDT" {
+		t.Fatalf("el cierre global debe incluir símbolo histórico y actual: %+v", attempts)
+	}
+	for _, attempt := range attempts {
+		if attempt.Err != nil || !attempt.Result.NoPosition {
+			t.Fatalf("no debía quedar posición abierta: %+v", attempt)
+		}
+	}
+	if exec.placed != 0 {
+		t.Fatalf("no debía enviar ventas, se enviaron %d", exec.placed)
+	}
 }
 
 // firstOnlyStrategy propone sus props solo en el primer Evaluate.

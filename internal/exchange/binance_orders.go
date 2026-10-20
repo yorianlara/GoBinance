@@ -2,7 +2,9 @@ package exchange
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 
 	"github.com/binance/binance-connector-go/clients/spot/src/restapi/models"
 )
+
+var ErrOrderSubmissionUncertain = errors.New("resultado del envío de la orden incierto")
 
 // OrderRequest es la petición de nueva orden.
 type OrderRequest struct {
@@ -42,6 +46,18 @@ type Fill struct {
 	Commission      float64
 	CommissionAsset string
 	ExecutedAt      time.Time
+}
+
+type CancelledOrder struct {
+	Symbol        string
+	OrderID       int64
+	ClientOrderID string
+	Status        string
+}
+
+type CancelAllResult struct {
+	Symbols []string
+	Orders  []CancelledOrder
 }
 
 // PlaceOrder envía una orden al exchange. Requiere credenciales.
@@ -99,10 +115,10 @@ func (b *BinanceClient) PlaceOrder(ctx context.Context, req OrderRequest) (Order
 
 	resp, err := builder.Execute()
 	if err != nil {
-		return OrderResponse{}, fmt.Errorf("enviar orden: %w", err)
+		return OrderResponse{}, fmt.Errorf("enviar orden: %w: %w", ErrOrderSubmissionUncertain, err)
 	}
 	if resp == nil {
-		return OrderResponse{}, fmt.Errorf("respuesta de orden vacía")
+		return OrderResponse{}, fmt.Errorf("%w: respuesta de orden vacía", ErrOrderSubmissionUncertain)
 	}
 
 	return OrderResponse{
@@ -145,6 +161,85 @@ func (b *BinanceClient) GetOrder(ctx context.Context, symbol string, orderID int
 		CummulativeQuoteQty: parseFloatSafe(resp.Data.GetCummulativeQuoteQty()),
 		Price:               parseFloatSafe(resp.Data.GetPrice()),
 	}, nil
+}
+
+// CancelOrder cancela una orden abierta en el exchange.
+func (b *BinanceClient) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	if b == nil || b.client == nil || b.client.RestApi == nil {
+		return fmt.Errorf("el cliente de Binance no está inicializado")
+	}
+	if symbol == "" || orderID <= 0 {
+		return fmt.Errorf("symbol y orderID son obligatorios")
+	}
+
+	_, err := b.client.RestApi.TradeAPI.DeleteOrder(ctx).
+		Symbol(symbol).
+		OrderId(orderID).
+		Execute()
+	if err != nil {
+		return fmt.Errorf("cancelar orden %d: %w", orderID, err)
+	}
+	return nil
+}
+
+// CancelAllOpenOrders cancela todas las órdenes abiertas, consultando primero
+// los símbolos activos y usando la cancelación masiva por símbolo de Binance.
+func (b *BinanceClient) CancelAllOpenOrders(ctx context.Context) (CancelAllResult, error) {
+	if b == nil || b.client == nil || b.client.RestApi == nil {
+		return CancelAllResult{}, fmt.Errorf("el cliente de Binance no está inicializado")
+	}
+
+	openOrders, err := b.client.RestApi.AccountAPI.GetOpenOrders(ctx).Execute()
+	if err != nil {
+		return CancelAllResult{}, fmt.Errorf("consultar órdenes abiertas: %w", err)
+	}
+	if openOrders == nil {
+		return CancelAllResult{}, fmt.Errorf("respuesta de órdenes abiertas vacía")
+	}
+
+	symbolSet := make(map[string]struct{})
+	var cancelErrors []error
+	for _, order := range openOrders.Data.Items {
+		symbol := order.GetSymbol()
+		if symbol == "" {
+			cancelErrors = append(cancelErrors, fmt.Errorf("orden abierta %d sin símbolo en la respuesta de Binance", order.GetOrderId()))
+			continue
+		}
+		symbolSet[symbol] = struct{}{}
+	}
+	symbols := make([]string, 0, len(symbolSet))
+	for symbol := range symbolSet {
+		symbols = append(symbols, symbol)
+	}
+	sort.Strings(symbols)
+	result := CancelAllResult{Symbols: symbols}
+
+	for _, symbol := range symbols {
+		response, err := b.client.RestApi.TradeAPI.DeleteOpenOrders(ctx).
+			Symbol(symbol).
+			Execute()
+		if err != nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("cancelar órdenes de %s: %w", symbol, err))
+			continue
+		}
+		if response == nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("cancelar órdenes de %s: respuesta vacía", symbol))
+			continue
+		}
+		for _, order := range response.Data.Items {
+			if order.GetStatus() != "CANCELED" {
+				cancelErrors = append(cancelErrors, fmt.Errorf("Binance no confirmó cancelación de la orden %d de %s; estado %q", order.GetOrderId(), symbol, order.GetStatus()))
+				continue
+			}
+			result.Orders = append(result.Orders, CancelledOrder{
+				Symbol:        order.GetSymbol(),
+				OrderID:       order.GetOrderId(),
+				ClientOrderID: order.GetClientOrderId(),
+				Status:        order.GetStatus(),
+			})
+		}
+	}
+	return result, errors.Join(cancelErrors...)
 }
 
 // GetTrades devuelve las ejecuciones de una orden.

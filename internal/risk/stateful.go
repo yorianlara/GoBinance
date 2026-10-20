@@ -125,10 +125,17 @@ func (sm *StatefulManager) OnOrderFilled(symbol string, valueUSDT float64) {
 // OnPositionClosed registra el cierre de una posición: resta exposición y
 // suma PnL (diario y total), decrementando OpenPositions.
 func (sm *StatefulManager) OnPositionClosed(symbol string, valueUSDT, pnl float64) {
+	sm.OnPositionsClosed(symbol, valueUSDT, pnl, 1)
+}
+
+func (sm *StatefulManager) OnPositionsClosed(symbol string, valueUSDT, pnl float64, positions int) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if sm.state.ExposureBySymbol == nil {
 		sm.state.ExposureBySymbol = make(map[string]float64)
+	}
+	if valueUSDT < 0 {
+		valueUSDT = 0
 	}
 	sm.state.ExposureBySymbol[symbol] -= valueUSDT
 	if sm.state.ExposureBySymbol[symbol] < 0 {
@@ -140,8 +147,9 @@ func (sm *StatefulManager) OnPositionClosed(symbol string, valueUSDT, pnl float6
 	}
 	sm.state.DailyPnL += pnl
 	sm.state.TotalPnL += pnl
-	if sm.state.OpenPositions > 0 {
-		sm.state.OpenPositions--
+	sm.state.OpenPositions -= positions
+	if sm.state.OpenPositions < 0 {
+		sm.state.OpenPositions = 0
 	}
 }
 

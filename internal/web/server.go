@@ -3,14 +3,18 @@ package web
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"mi-bot/internal/config"
 	"mi-bot/internal/domain"
+	"mi-bot/internal/exchange"
 	"mi-bot/internal/manager"
 	"mi-bot/internal/registry"
 	"mi-bot/internal/risk"
@@ -22,12 +26,27 @@ import (
 //go:embed all:templates
 var templatesFS embed.FS
 
+type OpenOrdersCanceller interface {
+	CancelAllOpenOrders(context.Context) (exchange.CancelAllResult, error)
+}
+
+type PositionCloser interface {
+	ClosePosition(context.Context, string) (manager.PositionCloseResult, error)
+}
+
+type AllPositionsCloser interface {
+	CloseAllPositions(context.Context) ([]manager.PositionCloseAttempt, error)
+}
+
 type Deps struct {
-	Bots     *manager.BotManager
-	Risk     *risk.StatefulManager
-	Registry registry.OrderRegistry
-	Capital  risk.CapitalProvider
-	Config   *config.Store
+	Bots               *manager.BotManager
+	Risk               *risk.StatefulManager
+	Registry           registry.OrderRegistry
+	Capital            risk.CapitalProvider
+	Config             *config.Store
+	OrderCanceller     OpenOrdersCanceller
+	PositionCloser     PositionCloser
+	AllPositionsCloser AllPositionsCloser
 }
 
 type Server struct {
@@ -36,6 +55,8 @@ type Server struct {
 	pages        *template.Template
 	sessionStore *session.Store
 	auth         authConfig
+	cancelAllMu  sync.Mutex
+	closeAllMu   sync.Mutex
 }
 
 func New(deps Deps) (*Server, error) {
@@ -119,7 +140,10 @@ func (s *Server) registerRoutes() {
 	s.app.Post("/bots/:id/enable", auth, s.handleEnable)
 	s.app.Post("/bots/:id/pause", auth, s.handlePause)
 	s.app.Post("/bots/:id/stop", auth, s.handleStop)
+	s.app.Post("/bots/:id/close-position", auth, s.handleClosePosition)
 	s.app.Delete("/bots/:id", auth, s.handleDelete)
+	s.app.Post("/account/orders/cancel-all", auth, s.handleCancelAllOrders)
+	s.app.Post("/account/positions/close-all", auth, s.handleCloseAllPositions)
 
 	if s.auth.Enabled {
 		slog.Info("web: autenticación activada")
@@ -352,6 +376,109 @@ func (s *Server) handleStop(c *fiber.Ctx) error {
 	slog.Info("web: bot detenido", "bot", c.Params("id"))
 	return s.renderBotResults(c, "Bot detenido.", false)
 }
+
+func (s *Server) handleClosePosition(c *fiber.Ctx) error {
+	if s.deps.PositionCloser == nil {
+		return s.renderBotResults(c, "No está configurado el cierre de posiciones.", true)
+	}
+	ctx, cancel := context.WithTimeout(c.UserContext(), 60*time.Second)
+	result, err := s.deps.PositionCloser.ClosePosition(ctx, c.Params("id"))
+	cancel()
+	c.Set("HX-Trigger", "botsChanged")
+	if err != nil {
+		slog.Error("web: cerrar posición del bot", "bot", c.Params("id"), "sold_qty", result.SoldQuantity, "err", err)
+		if result.SoldQuantity > 0 {
+			message := fmt.Sprintf("Venta parcial: %.8f %s; PnL realizado %.2f USDT. %v", result.SoldQuantity, result.Symbol, result.RealizedPnLUSDT, err)
+			return s.renderBotResults(c, message, true)
+		}
+		return s.renderBotResults(c, err.Error(), true)
+	}
+	if result.NoPosition {
+		return s.renderBotResults(c, fmt.Sprintf("Bot %q detenido. No tiene posición registrada para cerrar.", result.BotID), false)
+	}
+	slog.Info("web: posición del bot cerrada",
+		"bot", result.BotID,
+		"symbol", result.Symbol,
+		"sold_qty", result.SoldQuantity,
+		"proceeds_usdt", result.ProceedsUSDT,
+		"cost_basis_usdt", result.CostBasisUSDT,
+		"realized_pnl_usdt", result.RealizedPnLUSDT,
+	)
+	message := fmt.Sprintf("Posición cerrada: vendidas %.8f %s por %.2f USDT; coste %.2f USDT; PnL realizado %+.2f USDT. El bot quedó detenido.",
+		result.SoldQuantity, result.Symbol, result.ProceedsUSDT, result.CostBasisUSDT, result.RealizedPnLUSDT)
+	return s.renderBotResults(c, message, false)
+}
+
+func (s *Server) handleCloseAllPositions(c *fiber.Ctx) error {
+	s.closeAllMu.Lock()
+	defer s.closeAllMu.Unlock()
+
+	if s.deps.AllPositionsCloser == nil {
+		return s.renderBotFeedback(c, "No está configurado el cierre de posiciones.", true)
+	}
+
+	ctx, cancel := context.WithTimeout(c.UserContext(), 5*time.Minute)
+	defer cancel()
+
+	attempts, err := s.deps.AllPositionsCloser.CloseAllPositions(ctx)
+	if err != nil {
+		slog.Error("web: iniciar cierre global de posiciones", "err", err)
+		return s.renderBotFeedback(c, "No se pudo iniciar el cierre global: "+err.Error(), true)
+	}
+
+	closed, partial, withoutPosition, failed := 0, 0, 0, 0
+	var details []string
+	for _, attempt := range attempts {
+		if attempt.Err != nil {
+			failed++
+			details = append(details, fmt.Sprintf("%s/%s: %v", attempt.BotID, attempt.Symbol, attempt.Err))
+			slog.Error("web: cerrar posición en operación global",
+				"bot", attempt.BotID, "symbol", attempt.Symbol,
+				"sold_qty", attempt.Result.SoldQuantity, "err", attempt.Err)
+			if attempt.Result.SoldQuantity > 0 {
+				partial++
+			}
+			continue
+		}
+		result := attempt.Result
+		if result.NoPosition {
+			withoutPosition++
+			continue
+		}
+		if result.SoldQuantity > 0 {
+			if result.Partial {
+				partial++
+			} else {
+				closed++
+			}
+			slog.Info("web: posición cerrada en operación global",
+				"bot", result.BotID,
+				"symbol", result.Symbol,
+				"sold_qty", result.SoldQuantity,
+				"proceeds_usdt", result.ProceedsUSDT,
+				"cost_basis_usdt", result.CostBasisUSDT,
+				"realized_pnl_usdt", result.RealizedPnLUSDT,
+			)
+		}
+	}
+
+	message := fmt.Sprintf(
+		"Cierre global terminado: %d posición(es) cerrada(s), %d venta(s) parcial(es), %d bot/símbolo(s) sin posición registrada y %d error(es). Se revisaron %d posición(es) registrada(s).",
+		closed, partial, withoutPosition, failed, len(attempts),
+	)
+	if len(details) > 0 {
+		message += " Detalles: " + strings.Join(details, " | ")
+	}
+	slog.Info("web: cierre global de posiciones completado",
+		"position_attempts", len(attempts),
+		"positions_closed", closed,
+		"bots_without_position", withoutPosition,
+		"errors", failed,
+	)
+	c.Set("HX-Trigger", "botsChanged, metricsChanged")
+	return s.renderBotFeedback(c, message, failed > 0)
+}
+
 func (s *Server) handleDelete(c *fiber.Ctx) error {
 	if err := s.deps.Bots.Delete(c.Params("id")); err != nil {
 		slog.Warn("web: delete", "err", err)
@@ -359,6 +486,102 @@ func (s *Server) handleDelete(c *fiber.Ctx) error {
 	}
 	slog.Info("web: bot eliminado", "bot", c.Params("id"))
 	return s.renderBotResults(c, "Bot eliminado.", false)
+}
+
+func (s *Server) handleCancelAllOrders(c *fiber.Ctx) error {
+	s.cancelAllMu.Lock()
+	defer s.cancelAllMu.Unlock()
+
+	if s.deps.OrderCanceller == nil {
+		return s.renderBotFeedback(c, "No está configurada la conexión de cancelación de órdenes.", true)
+	}
+
+	var operationErrors []error
+	pausedBots := 0
+	for _, bot := range s.deps.Bots.List() {
+		if bot.Status != domain.BotStatusRunning {
+			continue
+		}
+		if err := s.deps.Bots.Pause(bot.ID); err != nil {
+			slog.Warn("web: pausar bot antes de cancelar órdenes", "bot", bot.ID, "err", err)
+			operationErrors = append(operationErrors, fmt.Errorf("pausar bot %q: %w", bot.ID, err))
+			continue
+		}
+		pausedBots++
+	}
+
+	ctx, cancel := context.WithTimeout(c.UserContext(), 60*time.Second)
+	result, err := s.deps.OrderCanceller.CancelAllOpenOrders(ctx)
+	cancel()
+	if err != nil {
+		slog.Error("web: cancelar todas las órdenes abiertas", "err", err)
+		operationErrors = append(operationErrors, err)
+	}
+
+	updated, err := s.markCancelledRegistryOrders(result.Orders)
+	if err != nil {
+		slog.Error("web: actualizar registro tras cancelación global", "err", err)
+		operationErrors = append(operationErrors, err)
+	}
+
+	slog.Info("web: cancelación global de órdenes completada",
+		"symbols", result.Symbols,
+		"cancelled_orders", len(result.Orders),
+		"registry_orders_updated", updated,
+		"bots_paused", pausedBots,
+		"has_errors", len(operationErrors) > 0,
+	)
+
+	orderLabel := "órdenes canceladas"
+	if len(result.Orders) == 1 {
+		orderLabel = "orden cancelada"
+	}
+	symbolLabel := "símbolos revisados"
+	if len(result.Symbols) == 1 {
+		symbolLabel = "símbolo revisado"
+	}
+	message := fmt.Sprintf("Cancelación global: Binance confirmó %d %s en %d %s. Bots pausados: %d.", len(result.Orders), orderLabel, len(result.Symbols), symbolLabel, pausedBots)
+	if len(operationErrors) > 0 {
+		message += " Algunas operaciones no se completaron; revisa los logs y las órdenes abiertas en Binance."
+	}
+	c.Set("HX-Trigger", "botsChanged")
+	return s.renderBotFeedback(c, message, len(operationErrors) > 0)
+}
+
+func (s *Server) markCancelledRegistryOrders(cancelled []exchange.CancelledOrder) (int, error) {
+	if s.deps.Registry == nil || len(cancelled) == 0 {
+		return 0, nil
+	}
+	orders, err := s.deps.Registry.List()
+	if err != nil {
+		return 0, fmt.Errorf("listar órdenes registradas: %w", err)
+	}
+	type exchangeOrderKey struct {
+		symbol string
+		id     int64
+	}
+	cancelledByExchangeID := make(map[exchangeOrderKey]struct{}, len(cancelled))
+	for _, order := range cancelled {
+		cancelledByExchangeID[exchangeOrderKey{symbol: order.Symbol, id: order.OrderID}] = struct{}{}
+	}
+
+	updated := 0
+	var updateErrors []error
+	for _, order := range orders {
+		if order.State != registry.StateSubmitted {
+			continue
+		}
+		key := exchangeOrderKey{symbol: order.Proposal.Symbol, id: order.ExchangeID}
+		if _, ok := cancelledByExchangeID[key]; !ok {
+			continue
+		}
+		if err := s.deps.Registry.MarkCancelled(order.ClientOrderID); err != nil {
+			updateErrors = append(updateErrors, fmt.Errorf("marcar orden %q como cancelada: %w", order.ClientOrderID, err))
+			continue
+		}
+		updated++
+	}
+	return updated, errors.Join(updateErrors...)
 }
 
 // ---------- configuración ----------

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"mi-bot/internal/config"
+	"mi-bot/internal/domain"
 )
 
 func TestDashboardTemplatesRender(t *testing.T) {
@@ -35,6 +36,26 @@ func TestDashboardTemplatesRender(t *testing.T) {
 	}
 	if !bytes.Contains(dashboard.Bytes(), []byte(`hx-trigger="every 5s, botsChanged from:body"`)) {
 		t.Fatal("falta el refresco inmediato de bots tras crear uno")
+	}
+	if !bytes.Contains(dashboard.Bytes(), []byte(`hx-post="/account/orders/cancel-all"`)) ||
+		!bytes.Contains(dashboard.Bytes(), []byte("hx-confirm=")) ||
+		!bytes.Contains(dashboard.Bytes(), []byte("incluidas las creadas fuera de mi-bot")) {
+		t.Fatal("la acción de cancelar todas las órdenes debe advertir y pedir confirmación")
+	}
+	if !bytes.Contains(dashboard.Bytes(), []byte(`hx-post="/account/positions/close-all"`)) ||
+		!bytes.Contains(dashboard.Bytes(), []byte("Cerrar todas las posiciones")) ||
+		!bytes.Contains(dashboard.Bytes(), []byte("Esta acción no se puede deshacer")) {
+		t.Fatal("el cierre global de posiciones debe advertir y pedir confirmación")
+	}
+	var botList bytes.Buffer
+	if err := pages.ExecuteTemplate(&botList, "bots-lista", []domain.Bot{{
+		ID: "bot-1", Name: "Bot 1", Strategy: domain.StrategyConfig{Type: "dca"},
+		Status: domain.BotStatusStopped, AllocationPercent: 10,
+	}}); err != nil {
+		t.Fatalf("renderizar lista de bots: %v", err)
+	}
+	if !bytes.Contains(botList.Bytes(), []byte(`hx-post="/bots/bot-1/close-position"`)) {
+		t.Fatal("falta la acción explícita para cerrar la posición del bot")
 	}
 
 	var feedback bytes.Buffer

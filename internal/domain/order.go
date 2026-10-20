@@ -24,14 +24,16 @@ const (
 // OrderProposal es la petición que un bot envía al RiskManager.
 // El bot NUNCA habla con Binance directamente: solo propone.
 type OrderProposal struct {
-	BotID      string    `json:"bot_id"`
-	Symbol     string    `json:"symbol"`
-	Side       OrderSide `json:"side"`
-	Type       OrderType `json:"type"`
-	Quantity   float64   `json:"quantity"`
-	LimitPrice float64   `json:"limit_price,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
-	ProposedAt time.Time `json:"proposed_at"`
+	BotID                 string    `json:"bot_id"`
+	Symbol                string    `json:"symbol"`
+	Side                  OrderSide `json:"side"`
+	Type                  OrderType `json:"type"`
+	Quantity              float64   `json:"quantity"`
+	LimitPrice            float64   `json:"limit_price,omitempty"`
+	Reason                string    `json:"reason,omitempty"`
+	ProposedAt            time.Time `json:"proposed_at"`
+	PositionCostBasisUSDT float64   `json:"position_cost_basis_usdt,omitempty"`
+	PositionsClosed       int       `json:"positions_closed,omitempty"`
 }
 
 func (p *OrderProposal) Validate() error {
@@ -65,6 +67,12 @@ func (p *OrderProposal) Validate() error {
 
 	if math.IsNaN(p.LimitPrice) || math.IsInf(p.LimitPrice, 0) {
 		return fmt.Errorf("el precio límite debe ser finito")
+	}
+	if math.IsNaN(p.PositionCostBasisUSDT) || math.IsInf(p.PositionCostBasisUSDT, 0) || p.PositionCostBasisUSDT < 0 {
+		return fmt.Errorf("el coste base de la posición debe ser finito y no negativo")
+	}
+	if p.PositionsClosed < 0 {
+		return fmt.Errorf("las posiciones cerradas no pueden ser negativas")
 	}
 	if p.Type == OrderTypeLimit && p.LimitPrice <= 0 {
 		return fmt.Errorf("una orden limit requiere limit_price mayor que cero")

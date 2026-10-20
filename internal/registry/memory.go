@@ -48,7 +48,6 @@ func (r *MemoryRegistry) Reserve(p domain.OrderProposal) (string, error) {
 			case StateReserved, StateSubmitted:
 				return "", fmt.Errorf("ya existe una orden activa para %s", k)
 			}
-			delete(r.orders, existingID)
 		}
 		delete(r.byKey, k)
 	}
@@ -80,6 +79,25 @@ func (r *MemoryRegistry) MarkFilled(clientOrderID string, filledQty, filledValue
 		o.FilledQty = filledQty
 		o.FilledValue = filledValue
 	})
+}
+
+func (r *MemoryRegistry) SetPositionCloseDetails(clientOrderID string, costBasisUSDT float64, positionsClosed int) error {
+	if costBasisUSDT < 0 || positionsClosed < 0 {
+		return fmt.Errorf("costBasisUSDT y positionsClosed no pueden ser negativos")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	order, ok := r.orders[clientOrderID]
+	if !ok {
+		return fmt.Errorf("no existe orden %q", clientOrderID)
+	}
+	if order.State != StateSubmitted {
+		return fmt.Errorf("orden %q no está en estado submitted", clientOrderID)
+	}
+	order.Proposal.PositionCostBasisUSDT = costBasisUSDT
+	order.Proposal.PositionsClosed = positionsClosed
+	order.UpdatedAt = time.Now()
+	return nil
 }
 
 func (r *MemoryRegistry) MarkCancelled(clientOrderID string) error {

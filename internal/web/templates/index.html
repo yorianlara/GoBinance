@@ -14,7 +14,7 @@
   </div>
   <div id="metrics-container"
        hx-get="/partials/metrics"
-       hx-trigger="every 5s"
+       hx-trigger="every 5s, metricsChanged from:body"
        hx-swap="innerHTML">
     {{template "metrics" .Metrics}}
   </div>
@@ -29,6 +29,38 @@
   </div>
   {{template "bot-form" .}}
   <div id="bot-form-feedback" aria-live="polite"></div>
+</section>
+
+<section class="section" aria-labelledby="cancel-orders-title">
+  <div class="section-heading">
+    <div>
+      <h2 id="cancel-orders-title">Órdenes abiertas de la cuenta</h2>
+      <p class="section-kicker">Pausa los bots en ejecución y cancela en Binance todas las órdenes abiertas, incluidas las creadas fuera de mi-bot.</p>
+    </div>
+    <button class="danger"
+            hx-post="/account/orders/cancel-all"
+            hx-target="#cancel-orders-feedback"
+            hx-swap="innerHTML"
+            hx-disabled-elt="this"
+            hx-confirm="¿Pausar los bots activos y cancelar TODAS las órdenes abiertas de la cuenta Binance Spot Testnet, incluso las que no creó mi-bot?">Cancelar todas</button>
+  </div>
+  <div id="cancel-orders-feedback" aria-live="polite"></div>
+</section>
+
+<section class="section" aria-labelledby="close-positions-title">
+  <div class="section-heading">
+    <div>
+      <h2 id="close-positions-title">Posiciones de los bots</h2>
+      <p class="section-kicker">Detiene todos los bots y vende a mercado solo las posiciones registradas por mi-bot. No liquida activos ajenos a los bots ni órdenes manuales.</p>
+    </div>
+    <button class="danger"
+            hx-post="/account/positions/close-all"
+            hx-target="#close-positions-feedback"
+            hx-swap="innerHTML"
+            hx-disabled-elt="this"
+            hx-confirm="ACCIÓN FINANCIERA: se detendrán todos los bots y se venderán a mercado sus posiciones registradas, una por una. Esta acción no se puede deshacer. ¿Continuar?">Cerrar todas las posiciones</button>
+  </div>
+  <div id="close-positions-feedback" aria-live="polite"></div>
 </section>
 
 <section class="section" aria-labelledby="bots-title">

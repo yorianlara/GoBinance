@@ -21,9 +21,16 @@ CREATE TABLE IF NOT EXISTS orders (
     exchange_id     BIGINT NOT NULL DEFAULT 0,
     filled_qty      DOUBLE PRECISION NOT NULL DEFAULT 0,
     filled_value    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    position_cost_basis_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
+    positions_closed INTEGER NOT NULL DEFAULT 0,
     created_at      TIMESTAMPTZ NOT NULL,
     updated_at      TIMESTAMPTZ NOT NULL
 );
+
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS position_cost_basis_usdt DOUBLE PRECISION NOT NULL DEFAULT 0;
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS positions_closed INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_orders_state ON orders(state);
 CREATE INDEX IF NOT EXISTS idx_orders_symbol ON orders(symbol);
