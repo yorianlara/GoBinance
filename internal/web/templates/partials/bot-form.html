@@ -1,0 +1,17 @@
+{{define "bot-form"}}
+<form class="crear" hx-post="/bots" hx-target="#bots-container" hx-swap="innerHTML" hx-on::after-request="if(event.detail.successful) this.reset()">
+  <input type="text" name="id" placeholder="ID" required>
+  <input type="text" name="name" placeholder="Nombre" required>
+  <select name="strategy_type" required>
+    <option value="dca">DCA</option>
+    <option value="grid">Grid</option>
+    <option value="ema">EMA</option>
+    <option value="rsi">RSI</option>
+    <option value="noop">Noop (test)</option>
+  </select>
+  <input type="text" name="symbol" placeholder="BTCUSDT" value="BTCUSDT" required>
+  <input type="number" name="allocation" placeholder="%" min="1" max="100" value="20" required>
+  <input type="number" name="amount_per_buy" placeholder="USDT/compra" min="1" value="20" required>
+  <button class="primary" type="submit">Crear bot</button>
+</form>
+{{end}}

@@ -1,0 +1,39 @@
+{{define "config-page"}}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Configuración — mi-bot</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    :root { --bg: #0f1419; --card: #1a2028; --border: #2a3441; --text: #e6e6e6; --muted: #8a94a6; --accent: #4ade80; --danger: #f87171; --warn: #fbbf24; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: var(--bg); color: var(--text); max-width: 1100px; margin-left: auto; margin-right: auto; }
+    h1 { margin: 0 0 .5rem; }
+    h2 { margin: 1.5rem 0 .5rem; font-size: 1.1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .subtitle { color: var(--muted); margin: 0 0 2rem; }
+    code { background: #2a3441; padding: .15rem .4rem; border-radius: 3px; font-size: .85em; }
+    .config-form { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 1rem 1.25rem; }
+    .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem 1rem; margin-bottom: 1rem; }
+    .config-grid label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; color: var(--muted); }
+    .config-grid input { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: .4rem .6rem; border-radius: 4px; font-family: inherit; }
+    button { background: #2a3441; color: var(--text); border: 1px solid var(--border); padding: .4rem .8rem; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #3a4553; }
+    button.primary { background: var(--accent); color: #0f1419; font-weight: 600; }
+    .flash-success { color: var(--accent); font-weight: 600; }
+    .flash-error { color: var(--danger); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Configuración</h1>
+  <p class="subtitle">Parámetros de riesgo · cambios aplicados en el siguiente tick</p>
+
+  <h2>Riesgo</h2>
+  <div id="config-form-container">
+    {{template "config-form" .}}
+  </div>
+
+  <p style="margin-top:2rem;"><a href="/" style="color:var(--accent);">← Volver al dashboard</a></p>
+</body>
+</html>
+{{end}}

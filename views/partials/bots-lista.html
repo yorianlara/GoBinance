@@ -1,0 +1,38 @@
+{{define "bots-lista"}}
+{{if .}}
+<table>
+  <thead>
+    <tr><th>ID</th><th>Nombre</th><th>Estrategia</th><th>Símbolo</th><th>Estado</th><th>Asignación</th><th>Acciones</th></tr>
+  </thead>
+  <tbody>
+    {{range .}}
+    <tr>
+      <td><code>{{.ID}}</code></td>
+      <td>{{.Name}}</td>
+      <td>{{.Strategy.Type}}</td>
+      <td>{{.Symbol}}</td>
+      <td class="status-{{.Status}}">{{.Status}}</td>
+      <td>{{printf "%.1f" .AllocationPercent}}%</td>
+      <td class="actions">
+        {{if eq .Status "running"}}
+          <button hx-post="/bots/{{.ID}}/pause" hx-target="#bots-container" hx-swap="innerHTML">Pausar</button>
+          <button hx-post="/bots/{{.ID}}/stop"  hx-target="#bots-container" hx-swap="innerHTML">Apagar</button>
+        {{else if eq .Status "paused"}}
+          <button hx-post="/bots/{{.ID}}/enable" hx-target="#bots-container" hx-swap="innerHTML">Reanudar</button>
+          <button hx-post="/bots/{{.ID}}/stop"   hx-target="#bots-container" hx-swap="innerHTML">Apagar</button>
+        {{else if eq .Status "stopped"}}
+          <button hx-post="/bots/{{.ID}}/enable" hx-target="#bots-container" hx-swap="innerHTML">Encender</button>
+          <button class="danger" hx-delete="/bots/{{.ID}}" hx-target="#bots-container" hx-swap="innerHTML" hx-confirm="¿Eliminar el bot {{.ID}}?">Eliminar</button>
+        {{else if eq .Status "created"}}
+          <button hx-post="/bots/{{.ID}}/enable" hx-target="#bots-container" hx-swap="innerHTML">Encender</button>
+          <button class="danger" hx-delete="/bots/{{.ID}}" hx-target="#bots-container" hx-swap="innerHTML" hx-confirm="¿Eliminar el bot {{.ID}}?">Eliminar</button>
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">Sin bots registrados.</p>
+{{end}}
+{{end}}

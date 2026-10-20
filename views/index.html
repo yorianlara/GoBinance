@@ -1,0 +1,26 @@
+{{define "content"}}
+<h1>mi-bot</h1>
+<p style="margin:0 0 1rem;"><a href="/config" style="color:var(--accent);">⚙️ Configuración</a></p>
+<p class="subtitle">Multi-Bot Trading · Binance Spot Testnet</p>
+
+<h2>Métricas</h2>
+<div id="metrics-container"
+     hx-get="/partials/metrics"
+     hx-trigger="every 5s"
+     hx-swap="innerHTML">
+  {{template "metrics" .Metrics}}
+</div>
+
+<h2>Crear bot</h2>
+{{template "bot-form" .}}
+
+<h2>Bots registrados ({{len .Bots}})</h2>
+<div id="bots-container"
+     hx-get="/partials/bots"
+     hx-trigger="every 5s"
+     hx-swap="innerHTML">
+  {{template "bots-lista" .Bots}}
+</div>
+
+<p style="margin-top:2rem;color:#8a94a6;font-size:.85rem;">Dashboard G4.</p>
+{{end}}

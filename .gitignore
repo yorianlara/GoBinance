@@ -1,0 +1,37 @@
+# Credenciales y secretos
+.env
+*.env
+*.key
+*.pem
+
+# Binarios compilados
+bin/
+mi-bot
+*.exe
+
+# Datos locales y persistencia (no van a GitHub)
+bots.json
+risk-state.json
+backups/
+
+# Configuración local (contiene nombres de env, pero puede tener rutas)
+config.yaml
+
+# Logs
+*.log
+
+# Archivos temporales
+*.tmp
+*.tmp-*
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Tests
+coverage.out

@@ -1,0 +1,65 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>{{.Title}} — mi-bot</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    :root { --bg: #0f1419; --card: #1a2028; --border: #2a3441; --text: #e6e6e6; --muted: #8a94a6; --accent: #4ade80; --danger: #f87171; --warn: #fbbf24; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: var(--bg); color: var(--text); max-width: 1100px; margin-left: auto; margin-right: auto; }
+    h1 { margin: 0 0 .5rem; }
+    h2 { margin: 1.5rem 0 .5rem; font-size: 1.1rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .subtitle { color: var(--muted); margin: 0 0 2rem; }
+    table { border-collapse: collapse; width: 100%; background: var(--card); border-radius: 6px; overflow: hidden; }
+    th, td { padding: .55rem .7rem; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    th { background: #232b36; font-size: .8rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    tr:last-child td { border-bottom: none; }
+    code { background: #2a3441; padding: .15rem .4rem; border-radius: 3px; font-size: .85em; }
+    .status-running { color: var(--accent); font-weight: 600; }
+    .status-paused { color: var(--warn); font-weight: 600; }
+    .status-stopped, .status-created { color: var(--muted); }
+    .status-error { color: var(--danger); font-weight: 600; }
+    .empty { color: var(--muted); text-align: center; padding: 2rem; }
+    .actions { display: flex; gap: .3rem; }
+    button { background: #2a3441; color: var(--text); border: 1px solid var(--border); padding: .3rem .6rem; border-radius: 4px; cursor: pointer; font-size: .8rem; }
+    button:hover { background: #3a4553; }
+    button.primary { background: var(--accent); color: #0f1419; font-weight: 600; }
+    button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+    button.danger:hover { background: #3d1f22; }
+    form.crear { display: flex; gap: .5rem; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
+    form.crear input, form.crear select { background: var(--card); color: var(--text); border: 1px solid var(--border); padding: .4rem .6rem; border-radius: 4px; font-family: inherit; }
+    form.crear input[type="number"] { width: 100px; }
+
+    .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .75rem; margin-bottom: 1rem; }
+    .metric { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: .75rem 1rem; display: flex; flex-direction: column; }
+    .metric-label { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: .25rem; }
+    .metric-value { font-size: 1.15rem; font-weight: 600; }
+    .metric-pos { color: var(--accent); }
+    .metric-neg { color: var(--danger); }
+    .metric-warn { color: var(--warn); }
+    .metric-err { font-size: .7rem; color: var(--danger); margin-top: .2rem; }
+
+    .config-form { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 1rem 1.25rem; }
+    .config-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem 1rem; margin-bottom: 1rem; }
+    .config-grid label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; color: var(--muted); }
+    .config-grid input { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: .4rem .6rem; border-radius: 4px; font-family: inherit; }
+    .flash-success { color: var(--accent); font-weight: 600; }
+    .flash-error { color: var(--danger); font-weight: 600; }
+
+    .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; padding-bottom: .75rem; border-bottom: 1px solid var(--border); }
+    .brand { color: var(--text); text-decoration: none; font-weight: 700; font-size: 1.1rem; }
+    .logout { color: var(--muted); text-decoration: none; font-size: .85rem; }
+    .logout:hover { color: var(--danger); }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="/" class="brand">mi-bot</a>
+    <a href="/logout" class="logout">Cerrar sesión</a>
+  </div>
+  {{template "content" .}}
+</body>
+</html>
+{{end}}

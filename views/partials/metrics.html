@@ -1,0 +1,50 @@
+{{define "metrics"}}
+<div class="metrics-grid">
+  <div class="metric">
+    <span class="metric-label">Capital total</span>
+    <span class="metric-value">{{if .CapitalErr}}—{{else}}{{printf "%.2f" .CapitalUSDT}} USDT{{end}}</span>
+    {{if .CapitalErr}}<span class="metric-err">{{.CapitalErr}}</span>{{end}}
+  </div>
+  <div class="metric">
+    <span class="metric-label">Exposición</span>
+    <span class="metric-value">{{printf "%.2f" .ExposureUSDT}} USDT</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Drawdown</span>
+    <span class="metric-value {{if gt .DrawdownPct 5.0}}metric-warn{{end}}">{{printf "%.2f" .DrawdownPct}}%</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">PnL hoy</span>
+    <span class="metric-value {{if lt .DailyPnL 0.0}}metric-neg{{else}}metric-pos{{end}}">{{printf "%.4f" .DailyPnL}} USDT</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">PnL total</span>
+    <span class="metric-value {{if lt .TotalPnL 0.0}}metric-neg{{else}}metric-pos{{end}}">{{printf "%.4f" .TotalPnL}} USDT</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">Posiciones abiertas</span>
+    <span class="metric-value">{{.OpenPositions}}</span>
+  </div>
+</div>
+
+<h3 style="margin-top:1.5rem;font-size:.95rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">Órdenes recientes</h3>
+{{if .RecentOrders}}
+<table>
+  <thead><tr><th>Client Order ID</th><th>Símbolo</th><th>Estado</th><th>Cantidad</th><th>Valor</th><th>Hace</th></tr></thead>
+  <tbody>
+    {{range .RecentOrders}}
+    <tr>
+      <td><code>{{slice .ClientOrderID 0 8}}…</code></td>
+      <td>{{.Symbol}}</td>
+      <td class="status-{{.State}}">{{.State}}</td>
+      <td>{{printf "%.6f" .Quantity}}</td>
+      <td>{{printf "%.2f" .FilledValue}} USDT</td>
+      <td>{{.Age}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">Sin órdenes recientes.</p>
+{{end}}
+{{end}}
